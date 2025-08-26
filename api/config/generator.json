@@ -1,8 +1,8 @@
 {
-  "default_provider": "google",
+  "default_provider": "openai",
   "providers": {
     "dashscope": {
-      "default_model": "qwen-plus",
+      "default_model": "qwen3-235b-a22b-instruct-2507",
       "supportsCustomModel": true,
       "models": {
         "qwen-plus": {
@@ -14,6 +14,14 @@
           "top_p": 0.8
         },
         "deepseek-r1": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
+        "qwen-max": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
+        "qwen3-235b-a22b-instruct-2507": {
           "temperature": 0.7,
           "top_p": 0.8
         }
@@ -41,9 +49,13 @@
       }
     },
     "openai": {
-      "default_model": "gpt-5-nano",
+      "default_model": "qwen-turbo",
       "supportsCustomModel": true,
       "models": {
+        "qwen-turbo": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
         "gpt-5": {
           "temperature": 1.0
         },
@@ -70,6 +82,22 @@
         },
         "o4-mini": {
           "temperature": 1.0
+        },
+		"qwen-plus": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
+        "deepseek-r1": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
+        "qwen-max": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        },
+        "qwen3-235b-a22b-instruct-2507": {
+          "temperature": 0.7,
+          "top_p": 0.8
         }
       }
     },
