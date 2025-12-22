@@ -42,7 +42,7 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
         # Handle backward compatibility
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
-        
+
         # Determine embedder type if not specified
         if embedder_type is None:
             from api.config import get_embedder_type
@@ -114,7 +114,10 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
                 clone_url = urlunparse((parsed.scheme, f"{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
             elif repo_type == "gitlab":
                 # Format: https://oauth2:{token}@gitlab.com/owner/repo.git
-                clone_url = urlunparse((parsed.scheme, f"oauth2:{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
+                scheme = parsed.scheme
+                if parsed.scheme == "https" and parsed.netloc == "git.ljdong.net":
+                    scheme = "http"
+                clone_url = urlunparse((scheme, f"oauth2:{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
             elif repo_type == "bitbucket":
                 # Format: https://x-token-auth:{token}@bitbucket.org/owner/repo.git
                 clone_url = urlunparse((parsed.scheme, f"x-token-auth:{encoded_token}@{parsed.netloc}", parsed.path, '', '', ''))
@@ -122,7 +125,7 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
             logger.info("Using access token for authentication")
 
         # Clone the repository
-        logger.info(f"Cloning repository from {repo_url} to {local_path}")
+        logger.info(f"Cloning repository from {repo_url} to {local_path}, {clone_url}")
         # We use repo_url in the log to avoid exposing the token in logs
         result = subprocess.run(
             ["git", "clone", "--depth=1", "--single-branch", clone_url, local_path],
@@ -150,7 +153,7 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
 # Alias for backward compatibility
 download_github_repo = download_repo
 
-def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder: bool = None, 
+def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder: bool = None,
                       excluded_dirs: List[str] = None, excluded_files: List[str] = None,
                       included_dirs: List[str] = None, included_files: List[str] = None):
     """
@@ -397,7 +400,7 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     # Handle backward compatibility
     if embedder_type is None and is_ollama_embedder is not None:
         embedder_type = 'ollama' if is_ollama_embedder else None
-    
+
     # Determine embedder type if not specified
     if embedder_type is None:
         embedder_type = get_embedder_type()
@@ -745,7 +748,7 @@ class DatabaseManager:
         # Handle backward compatibility
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
-        
+
         self.reset_database()
         self._create_repo(repo_url_or_path, repo_type, access_token)
         return self.prepare_db_index(embedder_type=embedder_type, excluded_dirs=excluded_dirs, excluded_files=excluded_files,
@@ -791,7 +794,7 @@ class DatabaseManager:
         try:
             # Strip whitespace to handle URLs with leading/trailing spaces
             repo_url_or_path = repo_url_or_path.strip()
-            
+
             root_path = get_adalflow_default_root_path()
 
             os.makedirs(root_path, exist_ok=True)
@@ -828,7 +831,7 @@ class DatabaseManager:
             logger.error(f"Failed to create repository structure: {e}")
             raise
 
-    def prepare_db_index(self, embedder_type: str = None, is_ollama_embedder: bool = None, 
+    def prepare_db_index(self, embedder_type: str = None, is_ollama_embedder: bool = None,
                         excluded_dirs: List[str] = None, excluded_files: List[str] = None,
                         included_dirs: List[str] = None, included_files: List[str] = None) -> List[Document]:
         """

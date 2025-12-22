@@ -95,8 +95,17 @@ fi\n\
 \n\
 # Start the API server in the background with the configured port\n\
 python -m api.main --port ${PORT:-8001} &\n\
+API_PID=$!\n\
+\n\
+# Start Next.js frontend\n\
 PORT=3000 HOSTNAME=0.0.0.0 node server.js &\n\
+FRONTEND_PID=$!\n\
+\n\
+# Wait for either process to exit\n\
 wait -n\n\
+\n\
+# Kill remaining processes on exit\n\
+# kill $API_PID $FRONTEND_PID 2>/dev/null || true\n\
 exit $?' > /app/start.sh && chmod +x /app/start.sh
 
 # Set environment variables
@@ -106,6 +115,7 @@ ENV SERVER_BASE_URL=http://localhost:${PORT:-8001}
 
 # Create empty .env file (will be overridden if one exists at runtime)
 RUN touch .env
+#COPY .env .env
 
 # Command to run the application
 CMD ["/app/start.sh"]

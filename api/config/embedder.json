@@ -1,9 +1,13 @@
 {
   "embedder": {
     "client_class": "OpenAIClient",
+    "initialize_kwargs": {
+      "api_key": "",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
     "batch_size": 500,
     "model_kwargs": {
-      "model": "text-embedding-3-small",
+      "model": "text-embedding-v4",
       "dimensions": 256,
       "encoding_format": "float"
     }
