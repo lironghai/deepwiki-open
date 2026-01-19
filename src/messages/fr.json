@@ -15,7 +15,8 @@
       "fetchingStructure": "Récupération de la structure du dépôt...",
       "determiningStructure": "Détermination de la structure du wiki...",
       "clearingCache": "Nettoyage du cache serveur...",
-      "preparingDownload": "Veuillez patienter pendant que nous préparons votre téléchargement..."
+      "preparingDownload": "Veuillez patienter pendant que nous préparons votre téléchargement...",
+      "preparingRepo": "Préparation du dépôt (clonage + embedding)..."
     },
     "home": {
       "welcome": "Bienvenue sur DeepWiki-Open",

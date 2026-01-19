@@ -1,10 +1,15 @@
 import type { NextConfig } from "next";
 
 const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
+const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://deepwiki.huaweik3.yingxiong.com';
 
 const nextConfig: NextConfig = {
   /* config options here */
   output: 'standalone',
+  // 将服务器 URL 暴露给客户端（浏览器）
+  env: {
+    NEXT_PUBLIC_WS_SERVER_URL: WS_SERVER_BASE_URL,
+  },
   // Optimize build for Docker
   experimental: {
     optimizePackageImports: ['@mermaid-js/mermaid', 'react-syntax-highlighter'],

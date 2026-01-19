@@ -14,6 +14,7 @@ from typing import (
     Sequence,
 )
 
+import time
 import logging
 import backoff
 from copy import deepcopy
@@ -736,13 +737,14 @@ class DashScopeEmbedder(DataComponent):
 class DashScopeBatchEmbedder(DataComponent):
     """Batch embedder specifically designed for DashScope API"""
 
-    def __init__(self, embedder, batch_size: int = 100, embedding_cache_file_name: str = "default") -> None:
+    def __init__(self, embedder, batch_size: int = 100, max_batch_size: int = None, embedding_cache_file_name: str = "default") -> None:
         super().__init__(batch_size=batch_size)
         self.embedder = embedder
         self.batch_size = batch_size
-        if self.batch_size > 25:
-            log.warning(f"DashScope batch embedder initialization, batch size: {self.batch_size}, note that DashScope batch embedding size cannot exceed 25, automatically set to 25")
-            self.batch_size = 25
+        # Apply max_batch_size limit if configured (configurable via embedder.json)
+        if max_batch_size is not None and self.batch_size > max_batch_size:
+            log.warning(f"DashScope batch embedder initialization, batch size: {self.batch_size} exceeds max_batch_size: {max_batch_size}, automatically adjusted")
+            self.batch_size = max_batch_size
         self.cache_path = f'./embedding_cache/{embedding_cache_file_name}_{self.embedder.__class__.__name__}_dashscope_embeddings.pkl'
 
     def call(
@@ -791,6 +793,7 @@ class DashScopeBatchEmbedder(DataComponent):
                     input=batch_input, model_kwargs=model_kwargs
                 )
                 embeddings.append(batch_output)
+
                 
                 # Validate batch output
                 if batch_output.error:
@@ -834,11 +837,11 @@ class DashScopeBatchEmbedder(DataComponent):
 class DashScopeToEmbeddings(DataComponent):
     """Component that converts document sequences to embedding vector sequences, specifically optimized for DashScope API"""
 
-    def __init__(self, embedder, batch_size: int = 100, force_recreate_db: bool = False, embedding_cache_file_name: str = "default") -> None:
+    def __init__(self, embedder, batch_size: int = 100, max_batch_size: int = None, force_recreate_db: bool = False, embedding_cache_file_name: str = "default") -> None:
         super().__init__(batch_size=batch_size)
         self.embedder = embedder
         self.batch_size = batch_size
-        self.batch_embedder = DashScopeBatchEmbedder(embedder=embedder, batch_size=batch_size, embedding_cache_file_name=embedding_cache_file_name)
+        self.batch_embedder = DashScopeBatchEmbedder(embedder=embedder, batch_size=batch_size, max_batch_size=max_batch_size, embedding_cache_file_name=embedding_cache_file_name)
         self.force_recreate_db = force_recreate_db
 
     def __call__(self, input: List[Document]) -> List[Document]:

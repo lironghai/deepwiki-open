@@ -1,5 +1,5 @@
 """OpenAI ModelClient integration."""
-
+import time
 import os
 import base64
 from typing import (
@@ -415,6 +415,8 @@ class OpenAIClient(ModelClient):
         log.info(f"api_kwargs: {api_kwargs}")
         self._api_kwargs = api_kwargs
         if model_type == ModelType.EMBEDDER:
+            log.info(f"model_type: {model_type} , start sleep 30")
+            time.sleep(10)
             return self.sync_client.embeddings.create(**api_kwargs)
         elif model_type == ModelType.LLM:
             if "stream" in api_kwargs and api_kwargs.get("stream", False):
