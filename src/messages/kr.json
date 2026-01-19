@@ -15,7 +15,8 @@
       "fetchingStructure": "저장소 구조를 가져오는 중...",
       "determiningStructure": "위키 구조를 결정하는 중...",
       "clearingCache": "서버 캐시를 지우는 중...",
-      "preparingDownload": "다운로드를 준비 중입니다. 잠시만 기다려 주세요..."
+      "preparingDownload": "다운로드를 준비 중입니다. 잠시만 기다려 주세요...",
+      "preparingRepo": "리포지토리 준비 중 (클론 + 임베딩)..."
     },
     "home": {
       "welcome": "DeepWiki-Open에 오신 것을 환영합니다",

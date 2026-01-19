@@ -15,7 +15,8 @@
     "fetchingStructure": "Đang lấy cấu trúc repository...",
     "determiningStructure": "Đang xác định cấu trúc wiki...",
     "clearingCache": "Đang xóa bộ nhớ đệm máy chủ...",
-    "preparingDownload": "Đang tải! Vui lòng chờ..."
+    "preparingDownload": "Đang tải! Vui lòng chờ...",
+    "preparingRepo": "Đang chuẩn bị kho lưu trữ (clone + embedding)..."
   },
   "home": {
     "welcome": "Chào mừng đến với DeepWiki-Open",

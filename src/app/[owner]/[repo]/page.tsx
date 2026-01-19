@@ -10,6 +10,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
+import { getWebSocketUrl } from '@/utils/websocketClient';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -543,10 +544,9 @@ Remember:
         let content = '';
 
         try {
-          // Create WebSocket URL from the server base URL
-          const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-          const wsBaseUrl = serverBaseUrl.replace(/^http/, 'ws')? serverBaseUrl.replace(/^https/, 'wss'): serverBaseUrl.replace(/^http/, 'ws');
-          const wsUrl = `${wsBaseUrl}/ws/chat`;
+          // Create WebSocket URL dynamically
+          const wsUrl = getWebSocketUrl('/ws/chat');
+          console.log('Connecting to WebSocket for page:', page.title, wsUrl);
 
           // Create a new WebSocket connection
           const ws = new WebSocket(wsUrl);
@@ -680,6 +680,181 @@ Remember:
     });
   }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl]);
 
+  // Helper function to check repository embedding status
+  const checkRepoStatus = useCallback(async (repoUrl: string, repoType: string, token: string): Promise<{
+    ready: boolean, 
+    status: 'ready' | 'processing' | 'not_found' | 'error',
+    message: string, 
+    filePaths?: string[]
+  }> => {
+    try {
+      const response = await fetch('/api/repo/status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          repo_type: repoType,
+          token: token || undefined
+        })
+      });
+
+      if (!response.ok) {
+        console.warn('Failed to check repository status:', response.status);
+        return { ready: false, status: 'error', message: 'Status check failed' };
+      }
+
+      const data = await response.json();
+      const serverStatus = data.status as 'ready' | 'processing' | 'not_found' | 'error';
+      
+      return {
+        // Only consider truly ready when status is 'ready' AND has file paths
+        ready: serverStatus === 'ready' && data.file_paths && data.file_paths.length > 0,
+        status: serverStatus,
+        message: data.message,
+        // Return server-side processed file paths if available
+        filePaths: data.file_paths || undefined
+      };
+    } catch (error) {
+      console.warn('Error checking repository status:', error);
+      return { ready: false, status: 'error', message: 'Status check error' };
+    }
+  }, []);
+
+  // Helper function to wait for repository to be ready with polling
+  // Uses longer intervals for 'processing' status (server is actively working)
+  const waitForRepoReady = useCallback(async (
+    repoUrl: string,
+    repoType: string,
+    token: string,
+    maxAttempts: number = 20,
+    processingIntervalMs: number = 30000,  // 30 seconds for 'processing' status
+    notFoundIntervalMs: number = 5000      // 5 seconds for 'not_found' status (waiting for first request)
+  ): Promise<{ready: boolean, filePaths?: string[]}> => {
+
+    return { ready: true };
+    // for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    //   const statusResult = await checkRepoStatus(repoUrl, repoType, token);
+    //
+    //   if (statusResult.ready && statusResult.filePaths && statusResult.filePaths.length > 0) {
+    //     console.log(`Repository ready after ${attempt} attempt(s): ${statusResult.message}`);
+    //     return { ready: true, filePaths: statusResult.filePaths };
+    //   }
+    //
+    //   // Determine wait interval based on status
+    //   let waitInterval: number;
+    //   let statusMessage: string;
+    //
+    //   if (statusResult.status === 'processing') {
+    //     // Server is actively processing, use longer interval
+    //     waitInterval = processingIntervalMs;
+    //     const waitSeconds = Math.round(waitInterval / 1000);
+    //     statusMessage = `Processing repository... (attempt ${attempt}/${maxAttempts}, next check in ${waitSeconds}s)`;
+    //   } else if (statusResult.status === 'not_found') {
+    //     // Repository not started yet, use shorter interval
+    //     waitInterval = notFoundIntervalMs;
+    //     statusMessage = `Waiting for repository processing to start... (attempt ${attempt}/${maxAttempts})`;
+    //   } else {
+    //     // Error or unknown status, use medium interval
+    //     waitInterval = 10000;
+    //     statusMessage = `Checking repository status... (attempt ${attempt}/${maxAttempts})`;
+    //   }
+    //
+    //   console.log(`Repository status: ${statusResult.status} (attempt ${attempt}/${maxAttempts}): ${statusResult.message}`);
+    //   setLoadingMessage(statusMessage);
+    //
+    //   // Wait before next attempt
+    //   await new Promise(resolve => setTimeout(resolve, waitInterval));
+    // }
+    //
+    // console.warn('Repository not ready after maximum attempts');
+    // return { ready: false };
+  }, [checkRepoStatus]);
+
+  // Prepare repository (async background processing) and wait for it to be ready
+  const prepareAndWaitForRepo = useCallback(async (repoUrl: string, repoType: string, token: string): Promise<{ready: boolean, filePaths?: string[]}> => {
+    const MAX_WAIT_ATTEMPTS = 12000; // Maximum 10 minutes (120 * 5s)
+    const POLL_INTERVAL_MS = 30000; // 5 seconds between polls
+
+    try {
+      // Step 1: Trigger background preparation
+      setLoadingMessage(messages.loading?.preparingRepo || 'Preparing repository (clone + embedding)...');
+      console.log('Triggering repository preparation...');
+
+      const prepareResponse = await fetch('/api/repo/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          repo_type: repoType,
+          token: token || undefined,
+          excluded_dirs: modelExcludedDirs || undefined,
+          excluded_files: modelExcludedFiles || undefined,
+          included_dirs: modelIncludedDirs || undefined,
+          included_files: modelIncludedFiles || undefined
+        })
+      });
+
+      const prepareData = await prepareResponse.json();
+      console.log('Prepare response:', prepareData);
+
+      // If already ready, return immediately
+      if (prepareData.status === 'ready') {
+        console.log('Repository already prepared');
+        // Get the file paths from status endpoint
+        const statusResponse = await fetch('/api/repo/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_url: repoUrl, repo_type: repoType, token: token || undefined })
+        });
+        const statusData = await statusResponse.json();
+        return { ready: true, filePaths: statusData.file_paths };
+      }
+
+      // Step 2: Poll for completion
+      for (let attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++) {
+        // Wait before polling
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+        setLoadingMessage(`${messages.loading?.preparingRepo || 'Preparing repository'}... (${attempt}/${MAX_WAIT_ATTEMPTS})`);
+
+        const statusResponse = await fetch('/api/repo/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_url: repoUrl, repo_type: repoType, token: token || undefined })
+        });
+
+        if (!statusResponse.ok) {
+          console.warn(`Status check failed: ${statusResponse.status}`);
+          continue;
+        }
+
+        const statusData = await statusResponse.json();
+        console.log(`Status check ${attempt}: ${statusData.status} - ${statusData.message}`);
+
+        if (statusData.status === 'ready') {
+          console.log(`Repository ready after ${attempt} poll(s)`);
+          return { ready: true, filePaths: statusData.file_paths };
+        }
+
+        if (statusData.status === 'error') {
+          console.error('Repository preparation failed:', statusData.message);
+          return { ready: false };
+        }
+
+        // Continue polling if still processing
+      }
+
+      console.warn('Repository preparation timed out after maximum attempts');
+      return { ready: false };
+
+    } catch (error) {
+      console.error('Error during repository preparation:', error);
+      return { ready: false };
+    }
+  }, [messages.loading, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles]);
+
   // Determine the wiki structure from repository data
   const determineWikiStructure = useCallback(async (fileTree: string, readme: string, owner: string, repo: string) => {
     if (!owner || !repo) {
@@ -702,6 +877,33 @@ Remember:
       // Get repository URL
       const repoUrl = getRepoUrl(effectiveRepoInfo);
 
+      // === NEW: Prepare repository in background and wait for it to be ready ===
+      setLoadingMessage(messages.loading?.preparingRepo || 'Preparing repository...');
+      console.log('Starting repository preparation (async)...');
+      
+      const prepResult = await prepareAndWaitForRepo(repoUrl, effectiveRepoInfo.type, currentToken);
+      
+      // Determine which file tree to use
+      let actualFileTree = fileTree;  // Default to frontend file tree
+      let serverFilePaths: string[] | undefined = undefined;
+      
+      if (prepResult.ready && prepResult.filePaths && prepResult.filePaths.length > 0) {
+        // Repository is ready, use server-side file list
+        actualFileTree = prepResult.filePaths.join('\n');
+        serverFilePaths = prepResult.filePaths;
+        console.log(`Repository prepared, using server-side file list (${prepResult.filePaths.length} files)`);
+      } else {
+        // Preparation failed or timed out, use frontend file tree
+        console.log('Repository preparation incomplete, using frontend file tree');
+      }
+      
+      // Log which file source is being used
+      if (serverFilePaths) {
+        console.log(`Wiki structure will be generated using ${serverFilePaths.length} files from server`);
+      } else {
+        console.log('Wiki structure will be generated using frontend file tree (server file list not available)');
+      }
+
       // Prepare request body
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const requestBody: Record<string, any> = {
@@ -711,9 +913,9 @@ Remember:
           role: 'user',
 content: `Analyze this GitHub repository ${owner}/${repo} and create a wiki structure for it.
 
-1. The complete file tree of the project:
+1. The complete file tree of the project (THESE ARE THE ONLY FILES THAT EXIST):
 <file_tree>
-${fileTree}
+${actualFileTree}
 </file_tree>
 
 2. The README file of the project:
@@ -825,11 +1027,13 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Ensure the XML is properly formatted and valid
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
-IMPORTANT:
+CRITICAL RULES - MUST FOLLOW:
 1. Create ${isComprehensiveView ? '8-12' : '4-6'} pages that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
 2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
-3. The relevant_files should be actual files from the repository that would be used to generate that page
-4. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
+3. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths that are not explicitly listed in the file tree.
+4. If the repository has very few files (e.g., only README.md), create fewer pages accordingly. DO NOT create pages that reference non-existent files.
+5. Before adding any <file_path>, verify it exists in the <file_tree> above. Common files like .gitignore, package.json, tsconfig.json, etc. should ONLY be included if they are ACTUALLY in the file tree.
+6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
         }]
       };
 
@@ -840,10 +1044,9 @@ IMPORTANT:
       let responseText = '';
 
       try {
-        // Create WebSocket URL from the server base URL
-        const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-        const wsBaseUrl = serverBaseUrl.replace(/^http/, 'ws')? serverBaseUrl.replace(/^https/, 'wss'): serverBaseUrl.replace(/^http/, 'ws');
-        const wsUrl = `${wsBaseUrl}/ws/chat`;
+        // Create WebSocket URL dynamically
+        const wsUrl = getWebSocketUrl('/ws/chat');
+        console.log('Connecting to WebSocket for wiki structure:', wsUrl);
 
         // Create a new WebSocket connection
         const ws = new WebSocket(wsUrl);
@@ -1161,7 +1364,7 @@ IMPORTANT:
     } finally {
       setStructureRequestInProgress(false);
     }
-  }, [generatePageContent, currentToken, effectiveRepoInfo, pagesInProgress.size, structureRequestInProgress, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, messages.loading, isComprehensiveView]);
+  }, [generatePageContent, currentToken, effectiveRepoInfo, pagesInProgress.size, structureRequestInProgress, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, language, messages.loading, isComprehensiveView, prepareAndWaitForRepo]);
 
   // Fetch repository structure using GitHub or GitLab API
   const fetchRepositoryStructure = useCallback(async () => {
@@ -1317,12 +1520,19 @@ IMPORTANT:
         }
       }
       else if (effectiveRepoInfo.type === 'gitlab') {
-        // GitLab API approach
+        // GitLab API approach - 使用代理解决 CORS 问题
         const projectPath = extractUrlPath(effectiveRepoInfo.repoUrl ?? '')?.replace(/\.git$/, '') || `${owner}/${repo}`;
         const projectDomain = extractUrlDomain(effectiveRepoInfo.repoUrl ?? "https://gitlab.com");
         const encodedProjectPath = encodeURIComponent(projectPath);
 
-        const headers = createGitlabHeaders(currentToken);
+        // 构建代理 URL 的辅助函数
+        const buildProxyUrl = (targetUrl: string, token?: string) => {
+          const params = new URLSearchParams({ url: targetUrl });
+          if (token) {
+            params.append('token', token);
+          }
+          return `/api/gitlab/proxy?${params.toString()}`;
+        };
 
         /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
         const filesData: any[] = [];
@@ -1337,7 +1547,9 @@ IMPORTANT:
           } catch (err) {
             throw new Error(`Invalid project domain URL: ${projectDomain}`);
           }
-          const projectInfoRes = await fetch(projectInfoUrl, { headers });
+          // 通过代理调用 GitLab API
+          const proxyUrl = buildProxyUrl(projectInfoUrl, currentToken);
+          const projectInfoRes = await fetch(proxyUrl);
 
           if (!projectInfoRes.ok) {
             const errorData = await projectInfoRes.text();
@@ -1356,7 +1568,9 @@ IMPORTANT:
           
           while (morePages) {
             const apiUrl = `${projectInfoUrl}/repository/tree?recursive=true&per_page=100&page=${page}`;
-            const response = await fetch(apiUrl, { headers });
+            // 通过代理调用 GitLab API
+            const treeProxyUrl = buildProxyUrl(apiUrl, currentToken);
+            const response = await fetch(treeProxyUrl);
 
             if (!response.ok) {
                 const errorData = await response.text();
@@ -1381,10 +1595,12 @@ IMPORTANT:
           .map((item: { type: string; path: string }) => item.path)
           .join('\n');
 
-          // Step 4: Try to fetch README.md content
-          const readmeUrl = `${projectInfoUrl}/repository/files/README.md/raw`;
+          // Step 4: Try to fetch README.md content (需要 ref 参数指定分支)
+          const readmeUrl = `${projectInfoUrl}/repository/files/README.md/raw?ref=${encodeURIComponent(defaultBranchLocal)}`;
             try {
-            const readmeResponse = await fetch(readmeUrl, { headers });
+            // 通过代理调用 GitLab API
+            const readmeProxyUrl = buildProxyUrl(readmeUrl, currentToken);
+            const readmeResponse = await fetch(readmeProxyUrl);
               if (readmeResponse.ok) {
                 readmeContent = await readmeResponse.text();
                 console.log('Successfully fetched GitLab README.md');

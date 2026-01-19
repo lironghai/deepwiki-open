@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1-labs
 
 # Build argument for custom certificates directory
 ARG CUSTOM_CERT_DIR="certs"
@@ -30,6 +29,7 @@ RUN python -m pip install poetry==2.0.1 --no-cache-dir && \
     poetry config virtualenvs.create true --local && \
     poetry config virtualenvs.in-project true --local && \
     poetry config virtualenvs.options.always-copy --local true && \
+    poetry lock && \
     POETRY_MAX_WORKERS=10 poetry install --no-interaction --no-ansi --only main && \
     poetry cache clear --all .
 
@@ -76,10 +76,11 @@ COPY --from=node_builder /app/public ./public
 COPY --from=node_builder /app/.next/standalone ./
 COPY --from=node_builder /app/.next/static ./.next/static
 
-# Expose the port the app runs on
-EXPOSE ${PORT:-8001} 3000
+# Expose the ports the app runs on
+# PORT: Backend API, 3000: Frontend, MCP_PORT: MCP Server (optional)
+EXPOSE ${PORT:-8001} 3000 ${MCP_PORT:-8002}
 
-# Create a script to run both backend and frontend
+# Create a script to run backend, frontend, and optionally MCP server
 RUN echo '#!/bin/bash\n\
 # Load environment variables from .env file if it exists\n\
 if [ -f .env ]; then\n\
@@ -97,6 +98,13 @@ fi\n\
 python -m api.main --port ${PORT:-8001} &\n\
 API_PID=$!\n\
 \n\
+# Start MCP server on separate port if MCP_ENABLED is set\n\
+if [ "${MCP_ENABLED:-false}" = "true" ]; then\n\
+  echo "Starting MCP Server on port ${MCP_PORT:-8002}..."\n\
+  python -m api.mcp_server --http --port ${MCP_PORT:-8002} &\n\
+  MCP_PID=$!\n\
+fi\n\
+\n\
 # Start Next.js frontend\n\
 PORT=3000 HOSTNAME=0.0.0.0 node server.js &\n\
 FRONTEND_PID=$!\n\
@@ -105,13 +113,21 @@ FRONTEND_PID=$!\n\
 wait -n\n\
 \n\
 # Kill remaining processes on exit\n\
-# kill $API_PID $FRONTEND_PID 2>/dev/null || true\n\
+# kill $API_PID $FRONTEND_PID $MCP_PID 2>/dev/null || true\n\
 exit $?' > /app/start.sh && chmod +x /app/start.sh
 
 # Set environment variables
 ENV PORT=8001
 ENV NODE_ENV=production
 ENV SERVER_BASE_URL=http://localhost:${PORT:-8001}
+# MCP Server configuration (optional, set MCP_ENABLED=true to enable)
+ENV MCP_ENABLED=true
+ENV MCP_PORT=8002
+
+ENV TZ="Asia/Shanghai"
+ENV RETRY_DELAY_MS=10000
+ENV REQUEST_TIMEOUT_MS=60000
+ENV LOG_FILE_PATH=api/logs/application.log
 
 # Create empty .env file (will be overridden if one exists at runtime)
 RUN touch .env

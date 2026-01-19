@@ -9,6 +9,8 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 import google.generativeai as genai
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Configure logging
 from api.logging_config import setup_logging
@@ -16,6 +18,12 @@ from api.logging_config import setup_logging
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# --- Background Task Management ---
+# Thread pool for background repository preparation tasks
+repo_prepare_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="repo_prepare")
+# Track repository preparation status: repo_url -> {"status": "processing|ready|error", "message": str, "started_at": datetime}
+preparing_repos: Dict[str, Dict[str, Any]] = {}
+preparing_repos_lock = threading.Lock()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -400,6 +408,10 @@ app.add_api_route("/chat/completions/stream", chat_completions_stream, methods=[
 # Add the WebSocket endpoint
 app.add_websocket_route("/ws/chat", handle_websocket_chat)
 
+# Import and add MCP routes
+from api.mcp_server import get_mcp_app
+app.include_router(get_mcp_app())
+
 # --- Wiki Cache Helper Functions ---
 
 WIKI_CACHE_DIR = os.path.join(get_adalflow_default_root_path(), "wikicache")
@@ -536,6 +548,377 @@ async def delete_wiki_cache(
     else:
         logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
         raise HTTPException(status_code=404, detail="Wiki cache not found")
+
+# --- Repository Status Check Endpoint ---
+class RepoStatusRequest(BaseModel):
+    """Model for repository status check request."""
+    repo_url: str = Field(..., description="URL or path of the repository")
+    repo_type: str = Field("github", description="Type of repository (github, gitlab, bitbucket, local)")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+
+class RepoStatusResponse(BaseModel):
+    """Model for repository status response."""
+    status: str = Field(..., description="Status of the repository: 'ready', 'processing', 'not_found', 'error'")
+    message: str = Field(..., description="Human-readable status message")
+    has_embeddings: bool = Field(False, description="Whether the repository has embedding data")
+    document_count: int = Field(0, description="Number of documents if ready")
+    file_paths: List[str] = Field(default_factory=list, description="List of file paths actually processed by the server")
+
+# --- Repository Prepare Endpoint (Async Background Processing) ---
+class RepoPrepareRequest(BaseModel):
+    """Model for repository prepare request."""
+    repo_url: str = Field(..., description="URL or path of the repository")
+    repo_type: str = Field("github", description="Type of repository (github, gitlab, bitbucket, local)")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+    excluded_dirs: Optional[str] = Field(None, description="Comma or newline separated directories to exclude")
+    excluded_files: Optional[str] = Field(None, description="Comma or newline separated files to exclude")
+    included_dirs: Optional[str] = Field(None, description="Comma or newline separated directories to include exclusively")
+    included_files: Optional[str] = Field(None, description="Comma or newline separated files to include exclusively")
+
+class RepoPrepareResponse(BaseModel):
+    """Model for repository prepare response."""
+    status: str = Field(..., description="Status: 'accepted', 'processing', 'ready', 'error'")
+    message: str = Field(..., description="Human-readable message")
+
+def _extract_repo_name(repo_url: str, repo_type: str) -> str:
+    """Extract repository name from URL for storage purposes."""
+    url_parts = repo_url.rstrip('/').split('/')
+    if repo_type in ["github", "gitlab", "bitbucket"] and len(url_parts) >= 5:
+        owner = url_parts[-2]
+        repo = url_parts[-1].replace(".git", "")
+        return f"{owner}_{repo}"
+    else:
+        return url_parts[-1].replace(".git", "")
+
+def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str],
+                             excluded_dirs: Optional[str], excluded_files: Optional[str],
+                             included_dirs: Optional[str], included_files: Optional[str]):
+    """Background task to prepare repository (clone + embedding).
+    
+    This only prepares the database (clone + embedding), without initializing
+    the full RAG pipeline which requires model configuration.
+    """
+    from urllib.parse import unquote
+    
+    try:
+        logger.info(f"Background prepare started for: {repo_url}")
+        
+        # Update status to processing
+        with preparing_repos_lock:
+            preparing_repos[repo_url] = {
+                "status": "processing",
+                "message": "Cloning repository and generating embeddings...",
+                "started_at": datetime.now()
+            }
+        
+        # Import DatabaseManager directly instead of RAG to avoid model configuration requirements
+        from api.data_pipeline import DatabaseManager
+        from api.config import get_embedder_type
+        
+        # Parse filter parameters
+        parsed_excluded_dirs = None
+        parsed_excluded_files = None
+        parsed_included_dirs = None
+        parsed_included_files = None
+        
+        if excluded_dirs:
+            parsed_excluded_dirs = [unquote(d) for d in excluded_dirs.split('\n') if d.strip()]
+        if excluded_files:
+            parsed_excluded_files = [unquote(f) for f in excluded_files.split('\n') if f.strip()]
+        if included_dirs:
+            parsed_included_dirs = [unquote(d) for d in included_dirs.split('\n') if d.strip()]
+        if included_files:
+            parsed_included_files = [unquote(f) for f in included_files.split('\n') if f.strip()]
+        
+        # Use DatabaseManager directly to prepare database (clone + embedding)
+        # This avoids the need for model configuration (GOOGLE_API_KEY etc.)
+        db_manager = DatabaseManager()
+        embedder_type = get_embedder_type()
+        
+        db_manager.prepare_database(
+            repo_url, 
+            repo_type, 
+            token,
+            embedder_type=embedder_type,
+            excluded_dirs=parsed_excluded_dirs,
+            excluded_files=parsed_excluded_files,
+            included_dirs=parsed_included_dirs,
+            included_files=parsed_included_files
+        )
+        
+        # Update status to ready
+        with preparing_repos_lock:
+            preparing_repos[repo_url] = {
+                "status": "ready",
+                "message": "Repository prepared successfully",
+                "completed_at": datetime.now()
+            }
+        
+        logger.info(f"Background prepare completed for: {repo_url}")
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Background prepare failed for {repo_url}: {error_msg}")
+        
+        with preparing_repos_lock:
+            preparing_repos[repo_url] = {
+                "status": "error",
+                "message": f"Preparation failed: {error_msg}",
+                "error_at": datetime.now()
+            }
+
+@app.post("/api/repo/prepare", response_model=RepoPrepareResponse)
+async def prepare_repo(request: RepoPrepareRequest):
+    """
+    Asynchronously start repository preparation (clone + embedding).
+    
+    This endpoint returns immediately with status 'accepted' and starts
+    background processing. Use /api/repo_status to check when processing is complete.
+    
+    Returns:
+        - 'accepted': Background preparation started
+        - 'processing': Already being processed
+        - 'ready': Repository already prepared
+        - 'error': An error occurred
+    """
+    repo_url = request.repo_url.strip()
+    
+    try:
+        # Check if already being prepared
+        with preparing_repos_lock:
+            if repo_url in preparing_repos:
+                prep_status = preparing_repos[repo_url]
+                if prep_status["status"] == "processing":
+                    return RepoPrepareResponse(
+                        status="processing",
+                        message="Repository is already being prepared"
+                    )
+                elif prep_status["status"] == "ready":
+                    # Check if the database actually exists
+                    pass  # Will be verified below
+        
+        # Check if repository is already ready (database exists)
+        root_path = get_adalflow_default_root_path()
+        repo_name = _extract_repo_name(repo_url, request.repo_type)
+        db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
+        
+        if os.path.exists(db_file) and os.path.getsize(db_file) > 0:
+            try:
+                from adalflow.core.db import LocalDB
+                db = LocalDB.load_state(db_file)
+                documents = db.get_transformed_data(key="split_and_embed")
+                
+                if documents and len(documents) > 0:
+                    valid_docs = [doc for doc in documents if hasattr(doc, 'vector') and doc.vector and len(doc.vector) > 0]
+                    if valid_docs:
+                        logger.info(f"Repository {repo_name} already prepared with {len(valid_docs)} documents")
+                        return RepoPrepareResponse(
+                            status="ready",
+                            message=f"Repository already prepared with {len(valid_docs)} embedded documents"
+                        )
+            except Exception as e:
+                logger.warning(f"Error loading existing database, will re-prepare: {e}")
+        
+        # Start background preparation
+        logger.info(f"Starting background preparation for: {repo_url}")
+        
+        repo_prepare_executor.submit(
+            _background_prepare_repo,
+            repo_url,
+            request.repo_type,
+            request.token,
+            request.excluded_dirs,
+            request.excluded_files,
+            request.included_dirs,
+            request.included_files
+        )
+        
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "message": "Repository preparation started. Use /api/repo_status to check progress."
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error starting repository preparation: {e}")
+        return RepoPrepareResponse(
+            status="error",
+            message=f"Failed to start preparation: {str(e)}"
+        )
+
+@app.post("/api/repo_status", response_model=RepoStatusResponse)
+async def check_repo_status(request: RepoStatusRequest):
+    """
+    Check if a repository's embedding data is ready for RAG queries.
+    This endpoint allows the frontend to check if a repository has been processed
+    before attempting to make chat requests.
+    
+    Returns:
+        - 'ready': Repository has been processed and embeddings are available
+        - 'processing': Repository is currently being prepared
+        - 'not_found': Repository has not been processed yet
+        - 'error': An error occurred while checking status
+    """
+    try:
+        from api.data_pipeline import DatabaseManager
+        
+        # Initialize database manager to check repository status
+        db_manager = DatabaseManager()
+        
+        # Strip whitespace from URL
+        repo_url = request.repo_url.strip()
+        
+        # First check if repository is currently being prepared in background
+        with preparing_repos_lock:
+            if repo_url in preparing_repos:
+                prep_status = preparing_repos[repo_url]
+                if prep_status["status"] == "processing":
+                    return RepoStatusResponse(
+                        status="processing",
+                        message=prep_status.get("message", "Repository is being prepared..."),
+                        has_embeddings=False,
+                        document_count=0
+                    )
+                # If status is "error" or "ready", continue to check the actual database
+                # The database might have been prepared by another process (e.g., WebSocket handler)
+        
+        # Get the root path for database storage
+        root_path = get_adalflow_default_root_path()
+        
+        # Extract repository name to find the database file
+        url_parts = repo_url.rstrip('/').split('/')
+        if request.repo_type in ["github", "gitlab", "bitbucket"] and len(url_parts) >= 5:
+            owner = url_parts[-2]
+            repo = url_parts[-1].replace(".git", "")
+            repo_name = f"{owner}_{repo}"
+        else:
+            repo_name = url_parts[-1].replace(".git", "")
+        
+        # Check if database file exists
+        db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
+        repo_dir = os.path.join(root_path, "repos", repo_name)
+        
+        logger.info(f"Checking repository status for {repo_name}: db_file={db_file}, repo_dir={repo_dir}")
+        
+        if os.path.exists(db_file):
+            # Check file size first - empty files are definitely corrupted
+            file_size = os.path.getsize(db_file)
+            if file_size == 0:
+                logger.warning(f"Database file is empty, removing: {db_file}")
+                try:
+                    os.remove(db_file)
+                except Exception as remove_err:
+                    logger.error(f"Failed to remove empty database file: {remove_err}")
+                return RepoStatusResponse(
+                    status="not_found",
+                    message="Database file was empty and has been removed. Please reprocess the repository.",
+                    has_embeddings=False,
+                    document_count=0
+                )
+            
+            # Database file exists, try to load and verify
+            try:
+                from adalflow.core.db import LocalDB
+                db = LocalDB.load_state(db_file)
+                documents = db.get_transformed_data(key="split_and_embed")
+                
+                if documents and len(documents) > 0:
+                    # Check if documents have valid embeddings
+                    valid_docs = [doc for doc in documents if hasattr(doc, 'vector') and doc.vector and len(doc.vector) > 0]
+                    if valid_docs:
+                        # Extract unique file paths from the documents
+                        unique_file_paths = list(set(
+                            doc.meta_data.get('file_path', '') 
+                            for doc in valid_docs 
+                            if hasattr(doc, 'meta_data') and doc.meta_data.get('file_path')
+                        ))
+                        unique_file_paths.sort()  # Sort for consistent ordering
+                        
+                        # Clear any stale error status in preparing_repos since database is ready
+                        with preparing_repos_lock:
+                            if repo_url in preparing_repos:
+                                del preparing_repos[repo_url]
+                        
+                        return RepoStatusResponse(
+                            status="ready",
+                            message=f"Repository is ready with {len(valid_docs)} embedded documents",
+                            has_embeddings=True,
+                            document_count=len(valid_docs),
+                            file_paths=unique_file_paths
+                        )
+                    else:
+                        return RepoStatusResponse(
+                            status="processing",
+                            message="Repository data exists but embeddings are not complete",
+                            has_embeddings=False,
+                            document_count=0
+                        )
+                else:
+                    return RepoStatusResponse(
+                        status="processing",
+                        message="Repository database exists but no documents found",
+                        has_embeddings=False,
+                        document_count=0
+                    )
+            except (EOFError, Exception) as e:
+                error_str = str(e)
+                # Check for pickle corruption errors
+                is_corrupted = (
+                    isinstance(e, EOFError) or 
+                    "Ran out of input" in error_str or 
+                    "could not find MARK" in error_str or
+                    "unpickling" in error_str.lower()
+                )
+                
+                if is_corrupted:
+                    logger.warning(f"Database file corrupted for {repo_name}: {e}, removing file")
+                    try:
+                        os.remove(db_file)
+                        logger.info(f"Removed corrupted database file: {db_file}")
+                    except Exception as remove_err:
+                        logger.error(f"Failed to remove corrupted database: {remove_err}")
+                    
+                    return RepoStatusResponse(
+                        status="not_found",
+                        message="Database file was corrupted and has been removed. Please reprocess the repository.",
+                        has_embeddings=False,
+                        document_count=0
+                    )
+                else:
+                    logger.warning(f"Error loading database for {repo_name}: {e}")
+                    return RepoStatusResponse(
+                        status="processing",
+                        message="Repository database exists but may be corrupted or incomplete",
+                        has_embeddings=False,
+                        document_count=0
+                    )
+        elif os.path.exists(repo_dir):
+            # Repository directory exists but database not yet created
+            return RepoStatusResponse(
+                status="processing",
+                message="Repository has been cloned but embeddings are not yet complete",
+                has_embeddings=False,
+                document_count=0
+            )
+        else:
+            # Repository not found at all
+            return RepoStatusResponse(
+                status="not_found",
+                message="Repository has not been processed yet",
+                has_embeddings=False,
+                document_count=0
+            )
+            
+    except Exception as e:
+        logger.error(f"Error checking repository status: {e}")
+        return RepoStatusResponse(
+            status="error",
+            message=f"Error checking repository status: {str(e)}",
+            has_embeddings=False,
+            document_count=0
+        )
 
 @app.get("/health")
 async def health_check():

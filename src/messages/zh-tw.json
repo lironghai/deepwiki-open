@@ -15,7 +15,8 @@
     "fetchingStructure": "取得儲存庫結構...",
     "determiningStructure": "驗證 Wiki 結構...",
     "clearingCache": "清除伺服器快取...",
-    "preparingDownload": "請稍候，我們正在準備您的下載..."
+    "preparingDownload": "請稍候，我們正在準備您的下載...",
+    "preparingRepo": "正在準備倉庫（克隆 + 嵌入處理）..."
   },
   "home": {
     "welcome": "歡迎使用 DeepWiki",

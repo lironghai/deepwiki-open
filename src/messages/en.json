@@ -15,7 +15,8 @@
     "fetchingStructure": "Fetching repository structure...",
     "determiningStructure": "Determining wiki structure...",
     "clearingCache": "Clearing server cache...",
-    "preparingDownload": "Please wait while we prepare your download..."
+    "preparingDownload": "Please wait while we prepare your download...",
+    "preparingRepo": "Preparing repository (clone + embedding)..."
   },
   "home": {
     "welcome": "Welcome to DeepWiki-Open",

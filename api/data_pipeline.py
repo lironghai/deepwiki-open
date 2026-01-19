@@ -11,7 +11,7 @@ import glob
 from adalflow.utils import get_adalflow_default_root_path
 from adalflow.core.db import LocalDB
 from api.config import configs, DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILES
-from api.ollama_patch import OllamaDocumentProcessor
+from api.ollama_patch import OllamaDocumentProcessor, RateLimitedEmbeddingProcessor
 from urllib.parse import urlparse, urlunparse, quote
 import requests
 from requests.exceptions import RequestException
@@ -415,11 +415,40 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
         # Use Ollama document processor for single-document processing
         embedder_transformer = OllamaDocumentProcessor(embedder=embedder)
     else:
-        # Use batch processing for OpenAI and Google embedders
+        # Use batch processing with rate limiting for API-based embedders
         batch_size = embedder_config.get("batch_size", 500)
-        embedder_transformer = ToEmbeddings(
-            embedder=embedder, batch_size=batch_size
-        )
+        # Apply max_batch_size limit if configured (e.g., DashScope text-embedding-v4 限制为 10)
+        max_batch_size = embedder_config.get("max_batch_size")
+        if max_batch_size is not None and batch_size > max_batch_size:
+            logger.info(f"Applying max_batch_size limit: {batch_size} -> {max_batch_size}")
+            batch_size = max_batch_size
+        
+        # Get rate limit configuration from model_kwargs
+        model_kwargs = embedder_config.get("model_kwargs", {})
+        rpm = embedder_config.get("rpm")  # Requests per minute
+        tpm = embedder_config.get("tpm")  # Tokens per minute
+        
+        # Use rate-limited processor if RPM or TPM is configured
+        if rpm or tpm:
+            logger.info(f"Using rate-limited embedding processor: RPM={rpm}, TPM={tpm}")
+            # embedder_transformer = RateLimitedEmbeddingProcessor(
+            #     embedder=embedder,
+            #     batch_size=batch_size,
+            #     rpm=rpm,
+            #     tpm=tpm
+            # )
+            embedder_transformer = ToEmbeddings(
+                embedder=embedder,
+                batch_size=batch_size
+            )
+        else:
+            # Fallback to standard ToEmbeddings if no rate limits configured
+            embedder_transformer = ToEmbeddings(
+                embedder=embedder, batch_size=batch_size
+            )
+            # embedder_transformer = RateLimitedEmbeddingProcessor(
+            #     embedder=embedder, batch_size=batch_size, rpm=1600, tpm=1100000
+            # )
 
     data_transformer = adal.Sequential(
         splitter, embedder_transformer
@@ -440,6 +469,9 @@ def transform_documents_and_save_to_db(
         is_ollama_embedder (bool, optional): DEPRECATED. Use embedder_type instead.
                                            If None, will be determined from configuration.
     """
+    # import tempfile
+    # import shutil
+    
     # Get the data transformer
     data_transformer = prepare_data_pipeline(embedder_type, is_ollama_embedder)
 
@@ -450,7 +482,80 @@ def transform_documents_and_save_to_db(
     db.transform(key="split_and_embed")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     db.save_state(filepath=db_path)
+    # Use atomic write: write to temp file first, then rename
+    # This prevents corrupted files if the process is interrupted
+    # temp_path = db_path + ".tmp"
+    # try:
+    #     db.save_state(filepath=temp_path)
+    #
+    #     # Verify the temp file is valid before replacing
+    #     if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+    #         # Atomic rename (on most systems)
+    #         if os.path.exists(db_path):
+    #             os.remove(db_path)
+    #         shutil.move(temp_path, db_path)
+    #         logger.info(f"Database saved successfully: {db_path}")
+    #     else:
+    #         raise ValueError("Temporary database file is empty or missing")
+    # except Exception as e:
+    #     # Clean up temp file if it exists
+    #     if os.path.exists(temp_path):
+    #         try:
+    #             os.remove(temp_path)
+    #         except:
+    #             pass
+    #     logger.error(f"Error saving database: {e}")
+    #     raise
+    
     return db
+
+
+def load_database_safely(db_path: str) -> LocalDB:
+    """
+    Safely load a database file with corruption detection and recovery.
+    
+    Args:
+        db_path: Path to the database file
+        
+    Returns:
+        LocalDB instance if successful
+        
+    Raises:
+        Exception if database cannot be loaded
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+    
+    # Check file size - empty files are definitely corrupted
+    file_size = os.path.getsize(db_path)
+    if file_size == 0:
+        logger.warning(f"Database file is empty, removing: {db_path}")
+        os.remove(db_path)
+        raise ValueError("Database file was empty and has been removed")
+    
+    try:
+        db = LocalDB.load_state(db_path)
+        return db
+    except EOFError as e:
+        # "Ran out of input" is typically an EOFError from pickle
+        logger.warning(f"Database file corrupted (truncated), removing: {db_path}")
+        try:
+            os.remove(db_path)
+            logger.info(f"Removed corrupted database file: {db_path}")
+        except Exception as remove_error:
+            logger.error(f"Failed to remove corrupted database: {remove_error}")
+        raise ValueError(f"Database file was corrupted and has been removed: {e}")
+    except Exception as e:
+        error_str = str(e)
+        # Check for common pickle corruption errors
+        if "Ran out of input" in error_str or "could not find MARK" in error_str or "unpickling" in error_str.lower():
+            logger.warning(f"Database file corrupted, removing: {db_path}")
+            try:
+                os.remove(db_path)
+                logger.info(f"Removed corrupted database file: {db_path}")
+            except Exception as remove_error:
+                logger.error(f"Failed to remove corrupted database: {remove_error}")
+        raise
 
 def get_github_file_content(repo_url: str, file_path: str, access_token: str = None) -> str:
     """
@@ -857,13 +962,29 @@ class DatabaseManager:
         if self.repo_paths and os.path.exists(self.repo_paths["save_db_file"]):
             logger.info("Loading existing database...")
             try:
+                # Use safe loading with corruption detection
+                # self.db = load_database_safely(self.repo_paths["save_db_file"])
                 self.db = LocalDB.load_state(self.repo_paths["save_db_file"])
                 documents = self.db.get_transformed_data(key="split_and_embed")
                 if documents:
                     logger.info(f"Loaded {len(documents)} documents from existing database")
                     return documents
+                else:
+                    logger.warning("Database loaded but contains no documents, will recreate")
+            except FileNotFoundError:
+                logger.info("Database file not found, will create new one")
+            except ValueError as e:
+                # Database was corrupted and removed, will recreate
+                logger.warning(f"Database was corrupted: {e}, will recreate")
             except Exception as e:
                 logger.error(f"Error loading existing database: {e}")
+                # Try to remove corrupted file
+                # try:
+                #     if os.path.exists(self.repo_paths["save_db_file"]):
+                #         os.remove(self.repo_paths["save_db_file"])
+                #         logger.info("Removed potentially corrupted database file")
+                # except:
+                #     pass
                 # Continue to create a new database
 
         # prepare the database

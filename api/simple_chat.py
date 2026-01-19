@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import List, Optional
@@ -90,7 +91,9 @@ async def chat_completions_stream(request: ChatCompletionRequest):
 
         # Create a new RAG instance for this request
         try:
+            logger.info(f"start init Rag : {request.provider} {request.model}")
             request_rag = RAG(provider=request.provider, model=request.model)
+            logger.info(f"end init Rag : {request.provider} {request.model}")
 
             # Extract custom file filter parameters if provided
             excluded_dirs = None
@@ -111,6 +114,13 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 included_files = [unquote(file_pattern) for file_pattern in request.included_files.split('\n') if file_pattern.strip()]
                 logger.info(f"Using custom included files: {included_files}")
 
+            # 使用线程池执行阻塞操作，避免阻塞事件循环
+            # await asyncio.to_thread(
+            #     request_rag.prepare_retriever,
+            #     request.repo_url, request.type, request.token,
+            #     excluded_dirs, excluded_files, included_dirs, included_files
+            # )
+            logger.info(f"start init Rag prepare_retriever : {request.provider} {request.model}")
             request_rag.prepare_retriever(request.repo_url, request.type, request.token, excluded_dirs, excluded_files, included_dirs, included_files)
             logger.info(f"Retriever prepared for {request.repo_url}")
         except ValueError as e:
