@@ -153,6 +153,7 @@ class AuthorizationConfig(BaseModel):
     code: str = Field(..., description="Authorization code")
 
 from api.config import configs, WIKI_AUTH_MODE, WIKI_AUTH_CODE
+from api.code_analyzer import analyze_repository, save_codemap, load_codemap
 
 @app.get("/lang/config")
 async def get_lang_config():
@@ -570,6 +571,7 @@ class RepoPrepareRequest(BaseModel):
     repo_url: str = Field(..., description="URL or path of the repository")
     repo_type: str = Field("github", description="Type of repository (github, gitlab, bitbucket, local)")
     token: Optional[str] = Field(None, description="Access token for private repositories")
+    branch: Optional[str] = Field(None, description="Branch name to clone (defaults to repository's default branch)")
     excluded_dirs: Optional[str] = Field(None, description="Comma or newline separated directories to exclude")
     excluded_files: Optional[str] = Field(None, description="Comma or newline separated files to exclude")
     included_dirs: Optional[str] = Field(None, description="Comma or newline separated directories to include exclusively")
@@ -592,7 +594,8 @@ def _extract_repo_name(repo_url: str, repo_type: str) -> str:
 
 def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str],
                              excluded_dirs: Optional[str], excluded_files: Optional[str],
-                             included_dirs: Optional[str], included_files: Optional[str]):
+                             included_dirs: Optional[str], included_files: Optional[str],
+                             branch: Optional[str]):
     """Background task to prepare repository (clone + embedding).
     
     This only prepares the database (clone + embedding), without initializing
@@ -643,7 +646,8 @@ def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str]
             excluded_dirs=parsed_excluded_dirs,
             excluded_files=parsed_excluded_files,
             included_dirs=parsed_included_dirs,
-            included_files=parsed_included_files
+            included_files=parsed_included_files,
+            branch=branch
         )
         
         # Update status to ready
@@ -730,7 +734,8 @@ async def prepare_repo(request: RepoPrepareRequest):
             request.excluded_dirs,
             request.excluded_files,
             request.included_dirs,
-            request.included_files
+            request.included_files,
+            request.branch
         )
         
         return JSONResponse(
@@ -1015,3 +1020,417 @@ async def get_processed_projects():
     except Exception as e:
         logger.error(f"Error listing processed projects from {WIKI_CACHE_DIR}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list processed projects from server cache.")
+
+# --- Codemap API Endpoints ---
+
+# Codemap cache directory
+CODEMAP_CACHE_DIR = os.path.join(get_adalflow_default_root_path(), "codemaps")
+os.makedirs(CODEMAP_CACHE_DIR, exist_ok=True)
+
+class RepoBranchesRequest(BaseModel):
+    """Model for repository branches request."""
+    repo_url: str = Field(..., description="URL of the repository")
+    repo_type: str = Field("github", description="Type of repository (github, gitlab, bitbucket)")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+
+class RepoBranchesResponse(BaseModel):
+    """Model for repository branches response."""
+    branches: List[str] = Field(..., description="List of branch names")
+    default_branch: Optional[str] = Field(None, description="Default branch name")
+
+class CodemapGenerateRequest(BaseModel):
+    """Model for codemap generation request."""
+    repo_url: str = Field(..., description="URL or path of the repository")
+    repo_type: str = Field("github", description="Type of repository (github, gitlab, bitbucket, local)")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+    branch: Optional[str] = Field(None, description="Branch name to clone (defaults to repository's default branch)")
+    options: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Analysis options")
+
+class CodemapResponse(BaseModel):
+    """Model for codemap response."""
+    nodes: List[Dict[str, Any]] = Field(..., description="List of code nodes")
+    edges: List[Dict[str, Any]] = Field(..., description="List of code edges")
+    metadata: Dict[str, Any] = Field(..., description="Metadata about the codemap")
+
+def get_codemap_cache_path(owner: str, repo: str, repo_type: str) -> str:
+    """Generates the file path for a given codemap cache."""
+    filename = f"codemap_{repo_type}_{owner}_{repo}.json"
+    return os.path.join(CODEMAP_CACHE_DIR, filename)
+
+@app.post("/api/repo/branches", response_model=RepoBranchesResponse)
+async def get_repo_branches(request: RepoBranchesRequest):
+    """
+    Get the list of branches for a repository.
+    
+    This endpoint fetches all branches from a Git repository using the Git API
+    or by querying the repository directly.
+    """
+    import subprocess
+    from urllib.parse import urlparse, quote
+    
+    try:
+        logger.info(f"Fetching branches for {request.repo_url}")
+        
+        # Parse URL to extract owner and repo
+        parsed = urlparse(request.repo_url)
+        path_parts = parsed.path.strip('/').replace('.git', '').split('/')
+        
+        if len(path_parts) < 2:
+            raise HTTPException(status_code=400, detail="Invalid repository URL format")
+        
+        # For GitHub and Bitbucket: owner/repo (last 2 parts)
+        # For GitLab: can be multi-level like group/subgroup/project (use full path)
+        owner = path_parts[-2]
+        repo = path_parts[-1]
+        
+        branches = []
+        default_branch = None
+        
+        # Try to use API first (faster and doesn't require cloning)
+        if request.repo_type == "github":
+            # Use GitHub API
+            import requests
+            api_url = f"https://api.github.com/repos/{owner}/{repo}/branches"
+            headers = {}
+            if request.token:
+                headers["Authorization"] = f"token {request.token}"
+            
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                branches_data = response.json()
+                branches = [b["name"] for b in branches_data]
+                
+                # Get default branch
+                repo_api_url = f"https://api.github.com/repos/{owner}/{repo}"
+                repo_response = requests.get(repo_api_url, headers=headers, timeout=10)
+                if repo_response.status_code == 200:
+                    default_branch = repo_response.json().get("default_branch")
+            else:
+                logger.warning(f"GitHub API returned {response.status_code}, falling back to git ls-remote")
+        
+        elif request.repo_type == "gitlab":
+            # Use GitLab API
+            import requests
+            # Support both gitlab.com and custom GitLab instances
+            gitlab_domain = parsed.netloc
+            # GitLab supports multi-level paths (group/subgroup/project)
+            # Use the full path, not just owner/repo
+            full_project_path = '/'.join(path_parts)
+            project_path = quote(full_project_path, safe='')
+            api_url = f"{parsed.scheme}://{gitlab_domain}/api/v4/projects/{project_path}/repository/branches"
+            headers = {}
+            if request.token:
+                headers["PRIVATE-TOKEN"] = request.token
+            
+            logger.info(f"GitLab API request: {api_url}")
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                branches_data = response.json()
+                branches = [b["name"] for b in branches_data]
+                default_branch = next((b["name"] for b in branches_data if b.get("default")), None)
+            else:
+                logger.warning(f"GitLab API returned {response.status_code}, falling back to git ls-remote")
+        
+        elif request.repo_type == "bitbucket":
+            # Use Bitbucket API
+            import requests
+            api_url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}/refs/branches"
+            headers = {}
+            if request.token:
+                headers["Authorization"] = f"Bearer {request.token}"
+            
+            response = requests.get(api_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                branches_data = response.json()
+                branches = [b["name"] for b in branches_data.get("values", [])]
+                
+                # Get default branch from main repo info
+                repo_api_url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}"
+                repo_response = requests.get(repo_api_url, headers=headers, timeout=10)
+                if repo_response.status_code == 200:
+                    main_branch = repo_response.json().get("mainbranch", {})
+                    default_branch = main_branch.get("name")
+            else:
+                logger.warning(f"Bitbucket API returned {response.status_code}, falling back to git ls-remote")
+        
+        # Fallback to git ls-remote if API didn't work
+        if not branches:
+            logger.info("Using git ls-remote to fetch branches")
+            clone_url = request.repo_url
+            
+            if request.token:
+                # Add token to URL
+                encoded_token = quote(request.token, safe='')
+                if request.repo_type == "github":
+                    clone_url = f"{parsed.scheme}://{encoded_token}@{parsed.netloc}{parsed.path}"
+                elif request.repo_type == "gitlab":
+                    clone_url = f"{parsed.scheme}://oauth2:{encoded_token}@{parsed.netloc}{parsed.path}"
+                elif request.repo_type == "bitbucket":
+                    clone_url = f"{parsed.scheme}://x-token-auth:{encoded_token}@{parsed.netloc}{parsed.path}"
+            
+            # Use git ls-remote to list branches
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", clone_url],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        # Format: <hash>\trefs/heads/<branch-name>
+                        parts = line.split('\t')
+                        if len(parts) == 2:
+                            branch_name = parts[1].replace('refs/heads/', '')
+                            branches.append(branch_name)
+                
+                # Try to get default branch using git ls-remote HEAD
+                head_result = subprocess.run(
+                    ["git", "ls-remote", "--symref", clone_url, "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if head_result.returncode == 0:
+                    for line in head_result.stdout.strip().split('\n'):
+                        if line.startswith('ref:'):
+                            # Format: ref: refs/heads/<branch-name>\tHEAD
+                            default_branch = line.split('refs/heads/')[-1].split('\t')[0]
+                            break
+            else:
+                error_msg = result.stderr
+                # Sanitize error message to remove tokens
+                if request.token:
+                    error_msg = error_msg.replace(request.token, "***TOKEN***")
+                    encoded_token = quote(request.token, safe='')
+                    error_msg = error_msg.replace(encoded_token, "***TOKEN***")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to fetch branches: {error_msg}"
+                )
+        
+        # If no default branch detected, try common defaults
+        if not default_branch and branches:
+            for common_default in ['main', 'master', 'develop', 'development']:
+                if common_default in branches:
+                    default_branch = common_default
+                    break
+            # If still no default, use the first branch
+            if not default_branch:
+                default_branch = branches[0]
+        
+        logger.info(f"Found {len(branches)} branches, default: {default_branch}")
+        
+        return RepoBranchesResponse(
+            branches=branches,
+            default_branch=default_branch
+        )
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Request timeout while fetching branches")
+    except Exception as e:
+        logger.error(f"Error fetching branches: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch branches: {str(e)}")
+
+@app.post("/api/codemap/generate", response_model=CodemapResponse)
+async def generate_codemap(request: CodemapGenerateRequest):
+    """
+    Generate a code map for a repository.
+    
+    This endpoint analyzes the code structure of a repository and returns
+    a visual representation of files, classes, functions, and their relationships.
+    """
+    try:
+        logger.info(f"Generating codemap for {request.repo_url}")
+        
+        # Extract repository name
+        from api.data_pipeline import DatabaseManager
+        db_manager = DatabaseManager()
+        
+        # Download/prepare repository
+        db_manager._create_repo(request.repo_url, request.repo_type, request.token, request.branch)
+        repo_path = db_manager.repo_paths["save_repo_dir"]
+        
+        # Extract owner and repo name
+        url_parts = request.repo_url.rstrip('/').split('/')
+        if request.repo_type in ["github", "gitlab", "bitbucket"] and len(url_parts) >= 5:
+            owner = url_parts[-2]
+            repo_name = url_parts[-1].replace(".git", "")
+        else:
+            owner = "local"
+            repo_name = os.path.basename(request.repo_url)
+        
+        # Check cache first
+        cache_path = get_codemap_cache_path(owner, repo_name, request.repo_type)
+        if os.path.exists(cache_path):
+            logger.info(f"Loading codemap from cache: {cache_path}")
+            codemap_data = load_codemap(cache_path)
+            return CodemapResponse(**codemap_data)
+        
+        # Analyze repository
+        logger.info(f"Analyzing repository at {repo_path}")
+        codemap_data = await asyncio.to_thread(analyze_repository, repo_path, request.options)
+        
+        # Add repository info to metadata
+        codemap_data['metadata']['repo_url'] = request.repo_url
+        codemap_data['metadata']['repo_type'] = request.repo_type
+        codemap_data['metadata']['owner'] = owner
+        codemap_data['metadata']['repo'] = repo_name
+        codemap_data['metadata']['generated_at'] = datetime.now().isoformat()
+        
+        # Save to cache
+        save_codemap(codemap_data, cache_path)
+        logger.info(f"Codemap saved to cache: {cache_path}")
+        
+        return CodemapResponse(**codemap_data)
+        
+    except Exception as e:
+        error_msg = f"Error generating codemap: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.get("/api/codemap")
+async def get_cached_codemap(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query("github", description="Repository type (e.g., github, gitlab)")
+):
+    """
+    Retrieve cached codemap data for a repository.
+    """
+    try:
+        cache_path = get_codemap_cache_path(owner, repo, repo_type)
+        
+        if not os.path.exists(cache_path):
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Codemap not found. Please generate it first."}
+            )
+        
+        logger.info(f"Loading cached codemap from {cache_path}")
+        codemap_data = load_codemap(cache_path)
+        
+        return codemap_data
+        
+    except Exception as e:
+        error_msg = f"Error loading codemap: {str(e)}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.delete("/api/codemap")
+async def delete_codemap_cache(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query("github", description="Repository type"),
+    authorization_code: Optional[str] = Query(None, description="Authorization code")
+):
+    """
+    Delete a specific codemap cache from the file system.
+    """
+    if WIKI_AUTH_MODE:
+        logger.info("check the authorization code")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+    
+    logger.info(f"Attempting to delete codemap cache for {owner}/{repo} ({repo_type})")
+    cache_path = get_codemap_cache_path(owner, repo, repo_type)
+    
+    if os.path.exists(cache_path):
+        try:
+            os.remove(cache_path)
+            logger.info(f"Successfully deleted codemap cache: {cache_path}")
+            return {"message": f"Codemap cache for {owner}/{repo} deleted successfully"}
+        except Exception as e:
+            logger.error(f"Error deleting codemap cache {cache_path}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to delete codemap cache: {str(e)}")
+    else:
+        logger.warning(f"Codemap cache not found, cannot delete: {cache_path}")
+        raise HTTPException(status_code=404, detail="Codemap cache not found")
+
+
+@app.get("/api/codemap/{owner}/{repo}/summary")
+async def get_codemap_summary(
+    owner: str,
+    repo: str,
+    repo_type: str = Query("github", description="Repository type"),
+    token: Optional[str] = Query(None, description="Access token for private repositories"),
+    force_refresh: bool = Query(False, description="Force regenerate summary even if cached")
+):
+    """
+    获取Codemap摘要，用于Wiki生成
+    返回精简的结构化代码信息，包括类、方法、架构层次和依赖关系
+    
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        repo_type: 仓库类型（github/gitlab/bitbucket）
+        token: 访问令牌（私有仓库）
+        force_refresh: 强制刷新（忽略缓存）
+        
+    Returns:
+        Codemap摘要数据
+    """
+    try:
+        from adalflow.utils import get_adalflow_default_root_path
+        from api.code_analyzer import CodeAnalyzer
+        
+        logger.info(f"Requesting codemap summary for {owner}/{repo}")
+        
+        # 构建repo路径
+        repo_path = os.path.join(get_adalflow_default_root_path(), "repos", f"{owner}_{repo}")
+        
+        # 检查缓存
+        cache_file = os.path.join(repo_path, ".codemap_summary.json")
+        
+        if not force_refresh and os.path.exists(cache_file):
+            # 检查缓存是否过期（1小时）
+            import time
+            cache_age = time.time() - os.path.getmtime(cache_file)
+            if cache_age < 3600:  # 1小时内的缓存有效
+                logger.info(f"Using cached codemap summary (age: {int(cache_age)}s)")
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        
+        # 检查仓库是否存在
+        if not os.path.exists(repo_path):
+            logger.warning(f"Repository not found at {repo_path}, need to clone first")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Repository not cloned yet. Please generate wiki or codemap first."
+            )
+        
+        logger.info(f"Analyzing repository at {repo_path}")
+        
+        # 生成Codemap
+        analyzer = CodeAnalyzer(repo_path)
+        codemap = analyzer.analyze()
+        
+        # 生成摘要
+        summary = analyzer.generate_codemap_summary()
+        
+        # 添加元数据
+        summary['owner'] = owner
+        summary['repo'] = repo
+        summary['repo_type'] = repo_type
+        summary['generated_at'] = datetime.now().isoformat()
+        
+        # 缓存摘要
+        try:
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(summary, f, indent=2, ensure_ascii=False)
+            logger.info(f"Cached codemap summary to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to cache summary: {e}")
+        
+        logger.info(f"Generated codemap summary: {summary['total_classes']} classes, "
+                   f"{summary['total_functions']} functions")
+        
+        return summary
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating codemap summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate codemap summary: {str(e)}")

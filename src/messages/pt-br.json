@@ -90,6 +90,11 @@
     "includeMode": "Incluir Apenas Caminhos",
     "excludeModeDescription": "Especificar caminhos a serem excluídos do processamento (comportamento padrão)",
     "includeModeDescription": "Especificar apenas os caminhos a serem incluídos, ignorando todos os outros",
+    "branch": "Branch",
+    "branchPlaceholder": "Digite o nome do branch (padrão: main/master)",
+    "branchHint": "Deixe vazio para usar o branch padrão",
+    "defaultBranch": "padrão",
+    "branchesFound": "{count} branches encontrados",
     "authorizationCode": "Código de Autorização",
     "authorizationRequired": "A autenticação é necessária para gerar a wiki."
   },

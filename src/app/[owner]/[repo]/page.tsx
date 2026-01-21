@@ -14,7 +14,7 @@ import { getWebSocketUrl } from '@/utils/websocketClient';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes } from 'react-icons/fa';
+import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram } from 'react-icons/fa';
 // Define the WikiSection and WikiStructure types directly in this file
 // since the imported types don't have the sections and rootSections properties
 interface WikiSection {
@@ -193,6 +193,7 @@ export default function RepoWikiPage() {
   const isCustomModelParam = searchParams.get('is_custom_model') === 'true';
   const customModelParam = searchParams.get('custom_model') || '';
   const language = searchParams.get('language') || 'en';
+  const branchParam = searchParams.get('branch') || undefined;
   const repoHost = (() => {
     if (!repoUrl) return '';
     try {
@@ -233,6 +234,8 @@ export default function RepoWikiPage() {
   const [currentPageId, setCurrentPageId] = useState<string | undefined>();
   const [generatedPages, setGeneratedPages] = useState<Record<string, WikiPage>>({});
   const [pagesInProgress, setPagesInProgress] = useState(new Set<string>());
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [codemapSummary, setCodemapSummary] = useState<any>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [originalMarkdown, setOriginalMarkdown] = useState<Record<string, string>>({});
@@ -416,14 +419,71 @@ export default function RepoWikiPage() {
         // Get repository URL
         const repoUrl = getRepoUrl(effectiveRepoInfo);
 
-        // Create the prompt content - simplified to avoid message dialogs
+        // Filter codemap modules relevant to this page
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let relevantModules: any[] = [];
+        if (codemapSummary && codemapSummary.key_modules && page.filePaths) {
+          relevantModules = codemapSummary.key_modules.filter((m: any) =>
+            page.filePaths.some((f: string) => m.file === f || m.file.includes(f) || f.includes(m.file))
+          );
+        }
+
+        // Create the prompt content - ENHANCED for deeper analysis with Codemap
  const promptContent =
-`You are an expert technical writer and software architect.
-Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
+`You are an expert technical writer, software architect, and code analyst with deep expertise in software engineering principles.
+Your task is to generate a DEEPLY TECHNICAL and COMPREHENSIVE wiki page in Markdown format about a specific feature, system, or module within a given software project.
+
+CRITICAL DEPTH REQUIREMENTS:
+This wiki page MUST be highly detailed and technical, covering:
+- Implementation details at the code level
+- Design patterns and architectural decisions
+- Algorithm complexity and performance characteristics  
+- Data structures and their trade-offs
+- API contracts and interfaces
+- Error handling strategies
+- Testing approaches
+- Security considerations (where applicable)
+
+${relevantModules.length > 0 ? `
+## Code Structure Information (from Codemap Analysis):
+
+This page should document the following classes/modules:
+
+${relevantModules.slice(0, 10).map((m: any) => `
+### ${m.name} (${m.type})
+- **File**: \`${m.file}\`
+- **Language**: ${m.language}
+${m.methods && m.methods.length > 0 ? `- **Methods**: ${m.methods.join(', ')}` : ''}
+${m.extends ? `- **Extends**: ${m.extends}` : ''}
+${m.implements && m.implements.length > 0 ? `- **Implements**: ${m.implements.join(', ')}` : ''}
+${m.field_count ? `- **Fields**: ${m.field_count} fields` : ''}
+`).join('\n')}
+
+${codemapSummary.dependencies && codemapSummary.dependencies.length > 0 ? `
+**Related Dependencies:**
+${codemapSummary.dependencies
+  .filter((d: any) => relevantModules.some((m: any) => m.name === d.from || m.name === d.to))
+  .slice(0, 15)
+  .map((d: any) => `- ${d.from} ${d.type} ${d.to}`)
+  .join('\n')}
+` : ''}
+
+**IMPORTANT**: Please include:
+1. **Class Diagram** (Mermaid syntax) showing inheritance (extends) and implementation (implements) relationships
+2. **Complete API Documentation** for all methods listed above with:
+   - Method signatures
+   - Parameters (with types and descriptions)
+   - Return values
+   - Exceptions/errors
+   - Usage examples
+3. **Dependency Diagram** (Mermaid syntax) showing how these modules interact
+4. **Practical code examples** demonstrating usage
+
+` : ''}
 
 You will be given:
 1. The "[WIKI_PAGE_TOPIC]" for the page you need to create.
-2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 5 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
+2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 10 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
 
 CRITICAL STARTING INSTRUCTION:
 The very first thing on the page MUST be a \`<details>\` block listing ALL the \`[RELEVANT_SOURCE_FILES]\` you used to generate the content. There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include.
@@ -444,9 +504,16 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
 
 1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of "${page.title}" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format \`[Link Text](#page-anchor-or-id)\`.
 
-2.  **Detailed Sections:** Break down "${page.title}" into logical sections using H2 (\`##\`) and H3 (\`###\`) Markdown headings. For each section:
-    *   Explain the architecture, components, data flow, or logic relevant to the section's focus, as evidenced in the source files.
-    *   Identify key functions, classes, data structures, API endpoints, or configuration elements pertinent to that section.
+2.  **Detailed Sections:** Break down "${page.title}" into logical sections using H2 (\`##\`) and H3 (\`###\`) Markdown headings. For each section, provide DEEP TECHNICAL ANALYSIS:
+    *   **Architecture & Design**: Explain the architectural patterns used (MVC, Observer, Factory, Singleton, etc.), design decisions, and their rationale based on code structure
+    *   **Implementation Details**: Describe key algorithms, data structures (time/space complexity where applicable), and implementation techniques at code level
+    *   **Component Interactions**: Detail how different classes/modules interact, what interfaces they implement, what protocols they follow
+    *   **Data Flow**: Trace how data moves through the system, transformations applied, validation steps, state management
+    *   **API Design**: Document function signatures, parameters (with types and constraints), return values, side effects, exceptions thrown
+    *   **Error Handling**: Describe exception handling strategies, error propagation, recovery mechanisms, logging approaches
+    *   **Performance Considerations**: Identify performance-critical paths, caching strategies, optimization techniques, potential bottlenecks
+    *   **Configuration & Customization**: Explain configuration options, environment variables, feature flags, extensibility points
+    *   **Dependencies**: List external libraries used, why they were chosen, how they're integrated
 
 3.  **Mermaid Diagrams:**
     *   EXTENSIVELY use Mermaid diagrams (e.g., \`flowchart TD\`, \`sequenceDiagram\`, \`classDiagram\`, \`erDiagram\`, \`graph TD\`) to visually represent architectures, flows, relationships, and schemas found in the source files.
@@ -501,6 +568,7 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
     *   Use the exact format: \`Sources: [filename.ext:start_line-end_line]()\` for a range, or \`Sources: [filename.ext:line_number]()\` for a single line. Multiple files can be cited: \`Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()\` (if the whole file is relevant and line numbers are not applicable or too broad).
     *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.
     *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.
+    *   **CRITICAL**: NEVER include source citations (like \`Sources: [file.ext]()\`) INSIDE Mermaid diagram code blocks. Source citations should ONLY appear in regular Markdown text, NOT within \`\`\`mermaid code blocks. Including citations in Mermaid diagrams will cause parsing errors.
 
 7.  **Technical Accuracy:** All information must be derived SOLELY from the \`[RELEVANT_SOURCE_FILES]\`. Do not infer, invent, or use external knowledge about similar systems or common practices unless it's directly supported by the provided code. If information is not present in the provided files, do not include it or explicitly state its absence if crucial to the topic.
 
@@ -789,6 +857,7 @@ Remember:
           repo_url: repoUrl,
           repo_type: repoType,
           token: token || undefined,
+          branch: branchParam || undefined,
           excluded_dirs: modelExcludedDirs || undefined,
           excluded_files: modelExcludedFiles || undefined,
           included_dirs: modelIncludedDirs || undefined,
@@ -904,6 +973,70 @@ Remember:
         console.log('Wiki structure will be generated using frontend file tree (server file list not available)');
       }
 
+      // === NEW: Generate full Codemap and fetch Summary for enhanced wiki generation ===
+      let codemapSummary: any = null;
+      try {
+        console.log('Generating codemap (this will also generate summary)...');
+        
+        // 首先尝试生成完整的codemap（这会同时生成summary）
+        try {
+          const generateResponse = await fetch('/api/codemap/generate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              repo_url: repoUrl,
+              repo_type: effectiveRepoInfo.type,
+              token: currentToken || undefined,
+              options: {
+                include_tests: true,
+                max_depth: 10,
+              },
+            }),
+          });
+          
+          if (generateResponse.ok) {
+            console.log('Full codemap generated successfully');
+            // 生成完整codemap后，获取summary用于Wiki生成
+            const summaryResponse = await fetch(
+              `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+            );
+            if (summaryResponse.ok) {
+              codemapSummary = await summaryResponse.json();
+              console.log(`Codemap summary loaded: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+              setCodemapSummary(codemapSummary); // Save to state for use in page generation
+            }
+          } else {
+            // 如果生成失败，尝试只获取summary（可能已经存在）
+            console.warn('Failed to generate codemap, trying to fetch existing summary...');
+            const summaryResponse = await fetch(
+              `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+            );
+            if (summaryResponse.ok) {
+              codemapSummary = await summaryResponse.json();
+              console.log(`Codemap summary loaded from cache: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+              setCodemapSummary(codemapSummary);
+            }
+          }
+        } catch (generateError) {
+          // 如果生成失败，尝试只获取summary
+          console.warn('Error generating codemap, trying to fetch existing summary:', generateError);
+          const summaryResponse = await fetch(
+            `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+          );
+          if (summaryResponse.ok) {
+            codemapSummary = await summaryResponse.json();
+            console.log(`Codemap summary loaded: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+            setCodemapSummary(codemapSummary);
+          } else {
+            console.warn('Codemap summary not available, proceeding without it');
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch codemap summary, proceeding without it:', error);
+      }
+
       // Prepare request body
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const requestBody: Record<string, any> = {
@@ -922,6 +1055,50 @@ ${actualFileTree}
 <readme>
 ${readme}
 </readme>
+
+${codemapSummary ? `
+3. Code Architecture Overview (from Codemap Analysis):
+
+**Project Statistics:**
+- Total Files: ${codemapSummary.total_files}
+- Total Classes/Interfaces: ${codemapSummary.total_classes}
+- Total Functions: ${codemapSummary.total_functions}
+- Total Lines: ${codemapSummary.total_lines}
+- Languages: ${codemapSummary.languages.join(', ')}
+
+${codemapSummary.architecture_layers && Object.keys(codemapSummary.architecture_layers).length > 0 ? `
+**Architecture Layers Detected:**
+${Object.entries(codemapSummary.architecture_layers).map(([layer, classes]: [string, any]) => 
+  `- **${layer}**: ${Array.isArray(classes) ? classes.slice(0, 8).join(', ') : ''}${Array.isArray(classes) && classes.length > 8 ? ` (and ${classes.length - 8} more)` : ''}`
+).join('\n')}
+` : ''}
+
+${codemapSummary.key_modules && codemapSummary.key_modules.length > 0 ? `
+**Key Modules to Document:**
+${codemapSummary.key_modules.slice(0, 20).map((m: any) => {
+  let desc = `- **${m.name}** (${m.type}) in \`${m.file}\``;
+  if (m.methods && m.methods.length > 0) {
+    desc += `\n  Methods: ${m.methods.slice(0, 5).join(', ')}${m.methods.length > 5 ? ', ...' : ''}`;
+  }
+  if (m.extends) {
+    desc += `\n  Extends: ${m.extends}`;
+  }
+  if (m.implements && m.implements.length > 0) {
+    desc += `\n  Implements: ${m.implements.join(', ')}`;
+  }
+  return desc;
+}).join('\n')}
+${codemapSummary.key_modules.length > 20 ? `\n(and ${codemapSummary.key_modules.length - 20} more modules)` : ''}
+` : ''}
+
+Based on this code structure analysis, please create wiki pages that:
+- Cover each architecture layer (controllers, services, models, etc.)
+- Document the key modules and their APIs in detail
+- Include class diagrams showing inheritance and implementation relationships
+- Explain the dependencies between modules
+- Provide comprehensive API documentation for important classes
+
+` : ''}
 
 I want to create a wiki for this repository. Determine the most logical structure for a wiki based on the repository's content.
 
@@ -1028,9 +1205,17 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
 CRITICAL RULES - MUST FOLLOW:
-1. Create ${isComprehensiveView ? '8-12' : '4-6'} pages that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
-2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
-3. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths that are not explicitly listed in the file tree.
+1. Create ${isComprehensiveView ? '12-16' : '6-8'} pages that would make a ${isComprehensiveView ? 'DEEPLY TECHNICAL and comprehensive' : 'concise but technical'} wiki for this repository
+2. Each page should provide DEEP TECHNICAL COVERAGE including:
+   - Implementation details and algorithms
+   - Design patterns and architectural decisions
+   - Code-level analysis with examples
+   - Performance characteristics
+   - Error handling strategies
+   - Testing approaches
+3. Pages should cover: Core Architecture, Data Models, API Design, Key Algorithms, State Management, Error Handling, Testing Strategy, Configuration, Deployment, Security (if applicable)
+4. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths that are not explicitly listed in the file tree.
+5. Each page should reference AT LEAST 8-10 source files for comprehensive technical coverage
 4. If the repository has very few files (e.g., only README.md), create fewer pages accordingly. DO NOT create pages that reference non-existent files.
 5. Before adding any <file_path>, verify it exists in the <file_tree> above. Common files like .gitignore, package.json, tsconfig.json, etc. should ONLY be included if they are ACTUALLY in the file tree.
 6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
@@ -1547,8 +1732,11 @@ CRITICAL RULES - MUST FOLLOW:
           } catch (err) {
             throw new Error(`Invalid project domain URL: ${projectDomain}`);
           }
+
           // 通过代理调用 GitLab API
           const proxyUrl = buildProxyUrl(projectInfoUrl, currentToken);
+
+          console.log(`GitLab fetch url: ${proxyUrl} projectInfoUrl: ${projectInfoUrl}`);
           const projectInfoRes = await fetch(proxyUrl);
 
           if (!projectInfoRes.ok) {
@@ -2315,6 +2503,17 @@ CRITICAL RULES - MUST FOLLOW:
               </div>
 
               {/* Export buttons */}
+              {/* Codemap Link */}
+              <div className="mb-5">
+                <Link
+                  href={`/${owner}/${repo}/codemap?${searchParams.toString()}`}
+                  className="btn-japanese flex items-center text-xs px-3 py-2 rounded-md w-full"
+                >
+                  <FaProjectDiagram className="mr-2" />
+                  代码地图
+                </Link>
+              </div>
+
               {Object.keys(generatedPages).length > 0 && (
                 <div className="mb-5">
                   <h4 className="text-sm font-semibold text-[var(--foreground)] mb-3 font-serif">

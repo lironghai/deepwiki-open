@@ -69,7 +69,7 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
         # Rough approximation: 4 characters per token
         return len(text) // 4
 
-def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_token: str = None) -> str:
+def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_token: str = None, branch: str = None) -> str:
     """
     Downloads a Git repository (GitHub, GitLab, or Bitbucket) to a specified local path.
 
@@ -78,6 +78,7 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
         repo_url (str): The URL of the Git repository to clone.
         local_path (str): The local directory where the repository will be cloned.
         access_token (str, optional): Access token for private repositories.
+        branch (str, optional): Branch name to clone. If None, clones the default branch.
 
     Returns:
         str: The output message from the `git` command.
@@ -125,16 +126,23 @@ def download_repo(repo_url: str, local_path: str, repo_type: str = None, access_
             logger.info("Using access token for authentication")
 
         # Clone the repository
-        logger.info(f"Cloning repository from {repo_url} to {local_path}, {clone_url}")
+        logger.info(f"Cloning repository from {repo_url} to {local_path}, branch: {branch or 'default'}")
         # We use repo_url in the log to avoid exposing the token in logs
+        
+        # Build git clone command with optional branch parameter
+        clone_cmd = ["git", "clone", "--depth=1"]
+        if branch:
+            clone_cmd.extend(["--branch", branch])
+        clone_cmd.extend(["--single-branch", clone_url, local_path])
+        
         result = subprocess.run(
-            ["git", "clone", "--depth=1", "--single-branch", clone_url, local_path],
+            clone_cmd,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
-        logger.info("Repository cloned successfully")
+        logger.info(f"Repository cloned successfully on branch: {branch or 'default'}")
         return result.stdout.decode("utf-8")
 
     except subprocess.CalledProcessError as e:
@@ -326,22 +334,54 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                     # Check token count
                     token_count = count_tokens(content, embedder_type)
+                    
                     if token_count > MAX_EMBEDDING_TOKENS * 10:
-                        logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
-                        continue
-
-                    doc = Document(
-                        text=content,
-                        meta_data={
-                            "file_path": relative_path,
-                            "type": ext[1:],
-                            "is_code": True,
-                            "is_implementation": is_implementation,
-                            "title": relative_path,
-                            "token_count": token_count,
-                        },
-                    )
-                    documents.append(doc)
+                        # 大文件 - 使用智能分块处理
+                        logger.info(f"Large code file {relative_path}: Token count ({token_count}) - applying intelligent chunking")
+                        from api.text_chunker import chunk_large_file
+                        
+                        # 分块处理
+                        count_fn = lambda text: count_tokens(text, embedder_type)
+                        chunks = chunk_large_file(content, relative_path, count_fn, 
+                                                  max_tokens=MAX_EMBEDDING_TOKENS * 8,  # 给代码文件更大的块
+                                                  overlap_tokens=400)
+                        
+                        # 为每个块创建文档
+                        for chunk in chunks:
+                            doc = Document(
+                                text=chunk.content,
+                                meta_data={
+                                    "file_path": relative_path,
+                                    "type": ext[1:],
+                                    "is_code": True,
+                                    "is_implementation": is_implementation,
+                                    "title": f"{relative_path} (Part {chunk.chunk_index + 1}/{chunk.total_chunks})",
+                                    "token_count": count_tokens(chunk.content, embedder_type),
+                                    "is_chunk": True,
+                                    "chunk_index": chunk.chunk_index,
+                                    "total_chunks": chunk.total_chunks,
+                                    "chunk_start_line": chunk.start_line,
+                                    "chunk_end_line": chunk.end_line,
+                                },
+                            )
+                            documents.append(doc)
+                        
+                        logger.info(f"Split {relative_path} into {len(chunks)} chunks")
+                    else:
+                        # 正常大小的文件 - 直接处理
+                        doc = Document(
+                            text=content,
+                            meta_data={
+                                "file_path": relative_path,
+                                "type": ext[1:],
+                                "is_code": True,
+                                "is_implementation": is_implementation,
+                                "title": relative_path,
+                                "token_count": token_count,
+                                "is_chunk": False,
+                            },
+                        )
+                        documents.append(doc)
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
 
@@ -360,22 +400,53 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                     # Check token count
                     token_count = count_tokens(content, embedder_type)
+                    
                     if token_count > MAX_EMBEDDING_TOKENS:
-                        logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
-                        continue
-
-                    doc = Document(
-                        text=content,
-                        meta_data={
-                            "file_path": relative_path,
-                            "type": ext[1:],
-                            "is_code": False,
-                            "is_implementation": False,
-                            "title": relative_path,
-                            "token_count": token_count,
-                        },
-                    )
-                    documents.append(doc)
+                        # 大文档文件 - 使用智能分块处理（Markdown按标题分块）
+                        logger.info(f"Large doc file {relative_path}: Token count ({token_count}) - applying intelligent chunking")
+                        from api.text_chunker import chunk_large_file
+                        
+                        # 分块处理
+                        count_fn = lambda text: count_tokens(text, embedder_type)
+                        chunks = chunk_large_file(content, relative_path, count_fn, 
+                                                  max_tokens=MAX_EMBEDDING_TOKENS,
+                                                  overlap_tokens=200)
+                        
+                        # 为每个块创建文档
+                        for chunk in chunks:
+                            doc = Document(
+                                text=chunk.content,
+                                meta_data={
+                                    "file_path": relative_path,
+                                    "type": ext[1:],
+                                    "is_code": False,
+                                    "is_implementation": False,
+                                    "title": f"{relative_path} (Part {chunk.chunk_index + 1}/{chunk.total_chunks})",
+                                    "token_count": count_tokens(chunk.content, embedder_type),
+                                    "is_chunk": True,
+                                    "chunk_index": chunk.chunk_index,
+                                    "total_chunks": chunk.total_chunks,
+                                    "chunk_metadata": chunk.metadata,
+                                },
+                            )
+                            documents.append(doc)
+                        
+                        logger.info(f"Split {relative_path} into {len(chunks)} chunks")
+                    else:
+                        # 正常大小的文档 - 直接处理
+                        doc = Document(
+                            text=content,
+                            meta_data={
+                                "file_path": relative_path,
+                                "type": ext[1:],
+                                "is_code": False,
+                                "is_implementation": False,
+                                "title": relative_path,
+                                "token_count": token_count,
+                                "is_chunk": False,
+                            },
+                        )
+                        documents.append(doc)
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
 
@@ -830,7 +901,8 @@ class DatabaseManager:
     def prepare_database(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None,
                          embedder_type: str = None, is_ollama_embedder: bool = None,
                          excluded_dirs: List[str] = None, excluded_files: List[str] = None,
-                         included_dirs: List[str] = None, included_files: List[str] = None) -> List[Document]:
+                         included_dirs: List[str] = None, included_files: List[str] = None,
+                         branch: str = None) -> List[Document]:
         """
         Create a new database from the repository.
 
@@ -846,6 +918,7 @@ class DatabaseManager:
             excluded_files (List[str], optional): List of file patterns to exclude from processing
             included_dirs (List[str], optional): List of directories to include exclusively
             included_files (List[str], optional): List of file patterns to include exclusively
+            branch (str, optional): Branch name to clone. If None, clones the default branch.
 
         Returns:
             List[Document]: List of Document objects
@@ -855,7 +928,7 @@ class DatabaseManager:
             embedder_type = 'ollama' if is_ollama_embedder else None
 
         self.reset_database()
-        self._create_repo(repo_url_or_path, repo_type, access_token)
+        self._create_repo(repo_url_or_path, repo_type, access_token, branch)
         return self.prepare_db_index(embedder_type=embedder_type, excluded_dirs=excluded_dirs, excluded_files=excluded_files,
                                    included_dirs=included_dirs, included_files=included_files)
 
@@ -882,7 +955,7 @@ class DatabaseManager:
             repo_name = url_parts[-1].replace(".git", "")
         return repo_name
 
-    def _create_repo(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None) -> None:
+    def _create_repo(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None, branch: str = None) -> None:
         """
         Download and prepare all paths.
         Paths:
@@ -893,6 +966,7 @@ class DatabaseManager:
             repo_type(str): Type of repository
             repo_url_or_path (str): The URL or local path of the repository
             access_token (str, optional): Access token for private repositories
+            branch (str, optional): Branch name to clone. If None, clones the default branch.
         """
         logger.info(f"Preparing repo storage for {repo_url_or_path}...")
 
@@ -914,9 +988,37 @@ class DatabaseManager:
                 # Check if the repository directory already exists and is not empty
                 if not (os.path.exists(save_repo_dir) and os.listdir(save_repo_dir)):
                     # Only download if the repository doesn't exist or is empty
-                    download_repo(repo_url_or_path, save_repo_dir, repo_type, access_token)
+                    download_repo(repo_url_or_path, save_repo_dir, repo_type, access_token, branch)
                 else:
-                    logger.info(f"Repository already exists at {save_repo_dir}. Using existing repository.")
+                    # Repository exists, check if we need to switch branches
+                    if branch:
+                        try:
+                            # Check current branch
+                            result = subprocess.run(
+                                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                cwd=save_repo_dir,
+                                capture_output=True,
+                                text=True,
+                                timeout=10
+                            )
+                            current_branch = result.stdout.strip() if result.returncode == 0 else None
+                            
+                            if current_branch != branch:
+                                logger.info(f"Repository exists but on branch '{current_branch}', requested branch is '{branch}'. Re-cloning...")
+                                # Remove existing repository and re-clone with specified branch
+                                import shutil
+                                shutil.rmtree(save_repo_dir)
+                                download_repo(repo_url_or_path, save_repo_dir, repo_type, access_token, branch)
+                            else:
+                                logger.info(f"Repository already exists at {save_repo_dir} on requested branch '{branch}'. Using existing repository.")
+                        except Exception as e:
+                            logger.warning(f"Could not check current branch, will re-clone: {e}")
+                            import shutil
+                            if os.path.exists(save_repo_dir):
+                                shutil.rmtree(save_repo_dir)
+                            download_repo(repo_url_or_path, save_repo_dir, repo_type, access_token, branch)
+                    else:
+                        logger.info(f"Repository already exists at {save_repo_dir}. Using existing repository.")
             else:  # local path
                 repo_name = os.path.basename(repo_url_or_path)
                 save_repo_dir = repo_url_or_path

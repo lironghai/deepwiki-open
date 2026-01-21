@@ -11,7 +11,7 @@
 export const getWebSocketUrl = (path: string = '/ws/chat') => {
   // 在服务端渲染时使用环境变量
   if (typeof window === 'undefined') {
-    const baseUrl = process.env.WS_SERVER_BASE_URL || 'http://deepwiki.huaweik3.yingxiong.com';
+    const baseUrl = process.env.WS_SERVER_BASE_URL || 'http://localhost:8001';
     const wsBaseUrl = baseUrl.replace(/^https/, 'wss').replace(/^http/, 'ws');
     return `${wsBaseUrl}${path}`;
   }

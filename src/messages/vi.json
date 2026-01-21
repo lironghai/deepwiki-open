@@ -81,6 +81,11 @@
     "defaultNote": "Các giá trị mặc định này đã được áp dụng. Thêm các loại trừ tùy chỉnh của bạn ở trên.",
     "hideDefault": "Ẩn mặc định",
     "viewDefault": "Xem mặc định",
+    "branch": "Nhánh",
+    "branchPlaceholder": "Nhập tên nhánh (mặc định: main/master)",
+    "branchHint": "Để trống để sử dụng nhánh mặc định",
+    "defaultBranch": "mặc định",
+    "branchesFound": "Tìm thấy {count} nhánh",
     "authorizationCode": "Mã xác thực",
     "authorizationRequired": "Mã xác thực cần thiết để tạo Wiki"
   },

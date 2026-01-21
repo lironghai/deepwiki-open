@@ -365,8 +365,21 @@ const Mermaid: React.FC<MermaidProps> = ({ chart, className = '', zoomingEnabled
         setError(null);
         setSvg('');
 
-        // Render the chart directly without preprocessing
-        const { svg: renderedSvg } = await mermaid.render(idRef.current, chart);
+        // 清理可能导致解析错误的文本
+        // 移除源代码引用格式（如 Sources: [file.ext]()）
+        let cleanedChart = chart
+          // 移除 Sources: [filename]() 格式的引用
+          .replace(/Sources:\s*\[[^\]]+\]\(\)/g, '')
+          // 移除单独的 Markdown 链接格式（在 Mermaid 代码块中）
+          .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
+          // 移除可能的中文括号和特殊字符导致的解析问题
+          .replace(/[（(]Sources:[^）)]+[）)]/g, '')
+          // 清理多余的空行
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+
+        // Render the chart
+        const { svg: renderedSvg } = await mermaid.render(idRef.current, cleanedChart);
 
         if (!isMounted) return;
 
@@ -387,19 +400,38 @@ const Mermaid: React.FC<MermaidProps> = ({ chart, className = '', zoomingEnabled
         const errorMessage = err instanceof Error ? err.message : String(err);
 
         if (isMounted) {
-          setError(`Failed to render diagram: ${errorMessage}`);
+          // 更友好的错误消息
+          const friendlyError = errorMessage.includes('Parse error') 
+            ? '图表语法错误：可能包含了不支持的字符或格式（如源代码引用）。请检查图表内容。'
+            : `渲染失败: ${errorMessage}`;
+          
+          setError(friendlyError);
 
           if (mermaidRef.current) {
             mermaidRef.current.innerHTML = `
-              <div class="text-red-500 dark:text-red-400 text-xs mb-1">Syntax error in diagram</div>
-              <pre class="text-xs overflow-auto p-2 bg-gray-100 dark:bg-gray-800 rounded">${chart}</pre>
+              <div class="text-red-500 dark:text-red-400 text-xs mb-2 p-2 bg-red-50 dark:bg-red-900/20 rounded">
+                <strong>图表渲染错误</strong><br/>
+                ${friendlyError}
+              </div>
+              <details class="mt-2">
+                <summary class="text-xs cursor-pointer text-gray-600 dark:text-gray-400">查看原始图表代码</summary>
+                <pre class="text-xs overflow-auto p-2 bg-gray-100 dark:bg-gray-800 rounded mt-2 max-h-40">${chart}</pre>
+              </details>
             `;
           }
         }
       }
     };
 
-    renderChart();
+    // 使用 try-catch 包装，确保错误不会导致整个应用崩溃
+    try {
+      renderChart();
+    } catch (err) {
+      console.error('Fatal error in Mermaid component:', err);
+      if (isMounted) {
+        setError('图表组件发生严重错误，请刷新页面重试。');
+      }
+    }
 
     return () => {
       isMounted = false;

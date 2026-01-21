@@ -196,6 +196,88 @@ async def handle_websocket_chat(websocket: WebSocket):
         # Get the query from the last message
         query = last_message.content
 
+        # === NEW: Try to get codemap context for code structure questions ===
+        codemap_context = ""
+        try:
+            # Extract owner and repo from repo_url
+            url_parts = request.repo_url.rstrip('/').split('/')
+            if request.type in ["github", "gitlab", "bitbucket"] and len(url_parts) >= 5:
+                owner = url_parts[-2]
+                repo_name = url_parts[-1].replace(".git", "")
+                
+                # Check if query is about code structure (class, method, architecture, etc.)
+                structure_keywords = ['class', 'method', 'function', 'interface', 'architecture', 
+                                     'structure', 'dependency', 'import', 'extends', 'implements',
+                                     '继承', '实现', '依赖', '架构', '类', '方法', '函数']
+                is_structure_query = any(keyword.lower() in query.lower() for keyword in structure_keywords)
+                
+                if is_structure_query:
+                    # Try to fetch codemap summary
+                    try:
+                        from adalflow.utils import get_adalflow_default_root_path
+                        import json
+                        import time
+                        
+                        repo_path = os.path.join(get_adalflow_default_root_path(), "repos", f"{owner}_{repo_name}")
+                        cache_file = os.path.join(repo_path, ".codemap_summary.json")
+                        
+                        # Check cache (1 hour validity)
+                        if os.path.exists(cache_file):
+                            cache_age = time.time() - os.path.getmtime(cache_file)
+                            if cache_age < 3600:
+                                with open(cache_file, 'r', encoding='utf-8') as f:
+                                    codemap_summary = json.load(f)
+                                    
+                                # Build context based on query
+                                codemap_context_parts = []
+                                
+                                # Add architecture overview if query mentions architecture
+                                if any(kw in query.lower() for kw in ['architecture', 'structure', '架构', '结构']):
+                                    if codemap_summary.get('architecture_layers'):
+                                        codemap_context_parts.append("## Code Architecture Overview:\n")
+                                        for layer, classes in codemap_summary['architecture_layers'].items():
+                                            if classes:
+                                                codemap_context_parts.append(f"- **{layer}**: {', '.join(classes[:10])}{'...' if len(classes) > 10 else ''}")
+                                
+                                # Add class information if query mentions specific classes
+                                if codemap_summary.get('key_modules'):
+                                    # Try to find relevant modules
+                                    relevant_modules = []
+                                    query_lower = query.lower()
+                                    for module in codemap_summary['key_modules'][:20]:
+                                        if (module['name'].lower() in query_lower or 
+                                            any(method.lower() in query_lower for method in module.get('methods', []))):
+                                            relevant_modules.append(module)
+                                    
+                                    if relevant_modules:
+                                        codemap_context_parts.append("\n## Relevant Code Modules:\n")
+                                        for module in relevant_modules[:5]:
+                                            module_info = f"- **{module['name']}** ({module.get('type', 'class')})"
+                                            if module.get('file'):
+                                                module_info += f" in `{module['file']}`"
+                                            if module.get('methods'):
+                                                module_info += f"\n  - Methods: {', '.join(module['methods'][:5])}"
+                                            if module.get('extends'):
+                                                module_info += f"\n  - Extends: {module['extends']}"
+                                            if module.get('implements'):
+                                                module_info += f"\n  - Implements: {', '.join(module['implements'])}"
+                                            codemap_context_parts.append(module_info)
+                                
+                                # Add dependencies if query mentions dependencies
+                                if any(kw in query.lower() for kw in ['dependency', 'import', '依赖', '导入']):
+                                    if codemap_summary.get('dependencies'):
+                                        codemap_context_parts.append("\n## Key Dependencies:\n")
+                                        for dep in codemap_summary['dependencies'][:10]:
+                                            codemap_context_parts.append(f"- `{dep.get('from', '?')}` {dep.get('type', 'imports')} `{dep.get('to', '?')}`")
+                                
+                                if codemap_context_parts:
+                                    codemap_context = "\n\n" + "\n".join(codemap_context_parts) + "\n\n"
+                                    logger.info(f"Injected codemap context for structure query")
+                    except Exception as e:
+                        logger.debug(f"Could not load codemap context: {e}")
+        except Exception as e:
+            logger.debug(f"Error extracting codemap context: {e}")
+
         # Only retrieve documents if input is not too large
         context_text = ""
         retrieved_documents = None
@@ -441,6 +523,11 @@ This file contains...
             # Add a note that we're skipping RAG due to size constraints or because it's the isolated API
             logger.info("No context available from RAG")
             prompt += "<note>Answering without retrieval augmentation.</note>\n\n"
+
+        # Inject codemap context if available (for code structure questions)
+        if codemap_context.strip():
+            prompt += f"<code_structure_context>\n{codemap_context}\n</code_structure_context>\n\n"
+            logger.info("Injected codemap context into prompt")
 
         prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 

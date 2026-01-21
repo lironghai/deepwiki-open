@@ -5,6 +5,7 @@ import rehypeRaw from 'rehype-raw';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import Mermaid from './Mermaid';
+import ErrorBoundary from './ErrorBoundary';
 
 interface MarkdownProps {
   content: string;
@@ -125,13 +126,23 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
       // Handle Mermaid diagrams
       if (!inline && match && match[1] === 'mermaid') {
         return (
-          <div className="my-8 bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden shadow-sm">
-            <Mermaid
-              chart={codeContent}
-              className="w-full max-w-full"
-              zoomingEnabled={true}
-            />
-          </div>
+          <ErrorBoundary
+            fallback={
+              <div className="my-8 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-4">
+                <p className="text-red-700 dark:text-red-300 text-sm">
+                  图表渲染失败，可能包含不支持的语法。请检查图表内容。
+                </p>
+              </div>
+            }
+          >
+            <div className="my-8 bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden shadow-sm">
+              <Mermaid
+                chart={codeContent}
+                className="w-full max-w-full"
+                zoomingEnabled={true}
+              />
+            </div>
+          </ErrorBoundary>
         );
       }
 

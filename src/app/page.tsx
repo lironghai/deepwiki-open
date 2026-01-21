@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { FaWikipediaW, FaGithub, FaCoffee, FaTwitter } from 'react-icons/fa';
+import { FaWikipediaW } from 'react-icons/fa';
 import ThemeToggle from '@/components/theme-toggle';
 import Mermaid from '../components/Mermaid';
 import ConfigurationModal from '@/components/ConfigurationModal';
@@ -94,6 +94,7 @@ export default function Home() {
           setIsCustomModel(config.isCustomModel || false);
           setCustomModel(config.customModel || '');
           setSelectedPlatform(config.selectedPlatform || 'github');
+          setSelectedBranch(config.selectedBranch || '');
           setExcludedDirs(config.excludedDirs || '');
           setExcludedFiles(config.excludedFiles || '');
           setIncludedDirs(config.includedDirs || '');
@@ -119,6 +120,7 @@ export default function Home() {
     if (repositoryInput) {
       loadConfigFromCache(repositoryInput);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Provider-based model selection state
@@ -136,6 +138,7 @@ export default function Home() {
   const [includedFiles, setIncludedFiles] = useState('');
   const [selectedPlatform, setSelectedPlatform] = useState<'github' | 'gitlab' | 'bitbucket'>('github');
   const [accessToken, setAccessToken] = useState('');
+  const [selectedBranch, setSelectedBranch] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState<string>(language);
@@ -318,6 +321,7 @@ export default function Home() {
           isCustomModel,
           customModel,
           selectedPlatform,
+          selectedBranch,
           excludedDirs,
           excludedFiles,
           includedDirs,
@@ -381,6 +385,11 @@ export default function Home() {
 
     // Add comprehensive parameter
     params.append('comprehensive', isComprehensiveView.toString());
+
+    // Add branch parameter if specified
+    if (selectedBranch) {
+      params.append('branch', selectedBranch);
+    }
 
     const queryString = params.toString() ? `?${params.toString()}` : '';
 
@@ -462,6 +471,8 @@ export default function Home() {
             setSelectedPlatform={setSelectedPlatform}
             accessToken={accessToken}
             setAccessToken={setAccessToken}
+            selectedBranch={selectedBranch}
+            setSelectedBranch={setSelectedBranch}
             excludedDirs={excludedDirs}
             setExcludedDirs={setExcludedDirs}
             excludedFiles={excludedFiles}

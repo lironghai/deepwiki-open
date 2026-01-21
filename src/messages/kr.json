@@ -81,6 +81,11 @@
       "defaultNote": "이 기본 설정은 이미 적용되었습니다. 위에 사용자 지정 제외 항목을 추가하세요.",
       "hideDefault": "기본값 숨기기",
       "viewDefault": "기본값 보기",
+      "branch": "브랜치",
+      "branchPlaceholder": "브랜치 이름 입력 (기본값: main/master)",
+      "branchHint": "비워두면 기본 브랜치를 사용합니다",
+      "defaultBranch": "기본값",
+      "branchesFound": "{count}개의 브랜치를 찾았습니다",
       "authorizationCode": "인증코드",
       "authorizationRequired": "Wiki 생성에는 인증코드가 필요합니다"
     },

@@ -81,6 +81,11 @@
     "defaultNote": "これらのデフォルト設定は既に適用されています。上記に追加の除外項目を入力してください。",
     "hideDefault": "デフォルトを隠す",
     "viewDefault": "デフォルトを表示",
+    "branch": "ブランチ",
+    "branchPlaceholder": "ブランチ名を入力（デフォルト：main/master）",
+    "branchHint": "空欄の場合はデフォルトブランチを使用",
+    "defaultBranch": "デフォルト",
+    "branchesFound": "{count}個のブランチが見つかりました",
     "authorizationCode": "認証コード",
     "authorizationRequired": "Wiki生成には認証コードが必要です"
   },

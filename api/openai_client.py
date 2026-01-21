@@ -415,7 +415,7 @@ class OpenAIClient(ModelClient):
         log.info(f"api_kwargs: {api_kwargs}")
         self._api_kwargs = api_kwargs
         if model_type == ModelType.EMBEDDER:
-            log.info(f"model_type: {model_type} , start sleep 30")
+            log.info(f"model_type: {model_type} , start sleep 10")
             time.sleep(10)
             return self.sync_client.embeddings.create(**api_kwargs)
         elif model_type == ModelType.LLM:
