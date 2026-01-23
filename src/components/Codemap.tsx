@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FaSearch, FaFilter, FaExpand, FaCompress, FaFileCode, FaFolder, FaCube, FaProjectDiagram } from 'react-icons/fa';
+import { FaSearch, FaFilter, FaExpand, FaCompress, FaFileCode, FaFolder, FaCube, FaProjectDiagram, FaProjectDiagram as FaLayout } from 'react-icons/fa';
+import { applyLayout, LayoutAlgorithm, LayoutNode, LayoutEdge } from '@/utils/codemapLayouts';
 
 // 动态导入ReactFlow以避免chunk加载问题
 let ReactFlow: any;
@@ -13,6 +14,7 @@ let useEdgesState: any;
 let Panel: any;
 let MarkerType: any;
 let Position: any;
+let Handle: any;
 
 // 延迟加载ReactFlow
 const loadReactFlow = async () => {
@@ -28,7 +30,8 @@ const loadReactFlow = async () => {
       Panel = reactflowModule.Panel;
       MarkerType = reactflowModule.MarkerType;
       Position = reactflowModule.Position;
-      
+      Handle = reactflowModule.Handle;
+
       // 动态导入样式（忽略类型检查，因为CSS文件没有类型声明）
       // @ts-ignore
       await import('reactflow/dist/style.css');
@@ -47,6 +50,7 @@ const loadReactFlow = async () => {
     Panel,
     MarkerType,
     Position,
+    Handle,
   };
 };
 
@@ -125,60 +129,92 @@ interface Node {
   targetPosition?: any;
 }
 
-const CustomNode: React.FC<{ data: any }> = ({ data }) => {
-  const colors = NodeTypeColors[data.type] || NodeTypeColors.file;
-  const icon = NodeTypeIcons[data.type] || NodeTypeIcons.file;
+// CustomNode需要在loadReactFlow之后创建，因为需要Handle组件
+let CustomNode: React.FC<{ data: any }> | null = null;
 
-  return (
-    <div
-      className="px-4 py-2 rounded-md border-2 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
-      style={{
-        backgroundColor: colors.bg,
-        borderColor: colors.border,
-        color: colors.text,
-        minWidth: '120px',
-      }}
-    >
-      <div className="flex items-center gap-2">
-        {icon}
-        <div className="text-sm font-medium truncate" title={data.label}>
-          {data.label}
+const createCustomNode = (HandleComponent: any, PositionEnum: any) => {
+  return ({ data }: { data: any }) => {
+    const colors = NodeTypeColors[data.type] || NodeTypeColors.file;
+    const icon = NodeTypeIcons[data.type] || NodeTypeIcons.file;
+
+    return (
+      <>
+        {/* Source handle (right side) - for outgoing edges */}
+        <HandleComponent
+          type="source"
+          position={PositionEnum.Right}
+          id="right"
+          style={{ background: colors.border }}
+        />
+
+        {/* Target handle (left side) - for incoming edges */}
+        <HandleComponent
+          type="target"
+          position={PositionEnum.Left}
+          id="left"
+          style={{ background: colors.border }}
+        />
+
+        <div
+          className="px-4 py-2 rounded-md border-2 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+          style={{
+            backgroundColor: colors.bg,
+            borderColor: colors.border,
+            color: colors.text,
+            minWidth: '120px',
+          }}
+        >
+          <div className="flex items-center gap-2">
+            {icon}
+            <div className="text-sm font-medium truncate" title={data.label}>
+              {data.label}
+            </div>
+          </div>
+          {data.description && (
+            <div className="text-xs mt-1 text-gray-600 truncate" title={data.description}>
+              {data.description}
+            </div>
+          )}
+          {data.language && (
+            <div className="text-xs mt-1 text-gray-500">
+              {data.language}
+            </div>
+          )}
         </div>
-      </div>
-      {data.description && (
-        <div className="text-xs mt-1 text-gray-600 truncate" title={data.description}>
-          {data.description}
-        </div>
-      )}
-      {data.language && (
-        <div className="text-xs mt-1 text-gray-500">
-          {data.language}
-        </div>
-      )}
-    </div>
-  );
+      </>
+    );
+  };
 };
 
-const nodeTypes = {
-  custom: CustomNode,
-};
+// nodeTypes will be created dynamically in CodemapContent after ReactFlow loads
 
 // 内部组件：实际使用ReactFlow的组件（所有hooks在顶层）
-function CodemapContent({ 
-  data, 
-  onNodeClick, 
+function CodemapContent({
+  data,
+  onNodeClick,
   className,
-  reactFlowComponents 
+  reactFlowComponents
 }: CodemapProps & { reactFlowComponents: any }) {
-  const { ReactFlow: RF, Background: Bg, Controls: Ctrl, MiniMap: MM, useNodesState: useNodes, useEdgesState: useEdges, Panel: Pnl, MarkerType: MT, Position: Pos } = reactFlowComponents;
+  const { ReactFlow: RF, Background: Bg, Controls: Ctrl, MiniMap: MM, useNodesState: useNodes, useEdgesState: useEdges, Panel: Pnl, MarkerType: MT, Position: Pos, Handle: Hdl } = reactFlowComponents;
+
+  // Create nodeTypes with Handle component
+  const nodeTypes = React.useMemo(() => {
+    if (!CustomNode) {
+      CustomNode = createCustomNode(Hdl, Pos);
+    }
+    return {
+      custom: CustomNode,
+    };
+  }, [Hdl, Pos]);
   
   // 所有hooks在组件顶层无条件调用
   const [nodes, setNodes, onNodesChange] = useNodes([]);
   const [edges, setEdges, onEdgesChange] = useEdges([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set(['directory']));
   const [selectedLanguages, setSelectedLanguages] = useState<Set<string>>(new Set());
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [layoutAlgorithm, setLayoutAlgorithm] = useState<LayoutAlgorithm>('grid');
 
   // 获取所有唯一的节点类型
   const availableTypes = useMemo(() => {
@@ -196,34 +232,88 @@ function CodemapContent({
     return Array.from(languages);
   }, [data.nodes]);
 
-  // 布局算法 - 简单的分层布局
-  const layoutNodes = useCallback((codeNodes: CodeNode[]) => {
-    const nodeMap = new Map<string, CodeNode>();
-    codeNodes.forEach(n => nodeMap.set(n.id, n));
+  // 布局算法 - 使用高级布局系统
+  const layoutNodes = useCallback((codeNodes: CodeNode[], codeEdges: CodeEdge[]) => {
+    console.log(`Applying layout algorithm: ${layoutAlgorithm}`);
 
-    // 按类型分组
-    const typeGroups: Record<string, CodeNode[]> = {};
-    codeNodes.forEach(node => {
-      if (!typeGroups[node.type]) {
-        typeGroups[node.type] = [];
-      }
-      typeGroups[node.type].push(node);
-    });
+    // Convert to layout format
+    const layoutNodesData: LayoutNode[] = codeNodes.map(node => ({
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      path: node.path,
+      description: node.description,
+      metadata: node.metadata,
+    }));
 
-    const layouted: Node[] = [];
-    let yOffset = 0;
-    const xSpacing = 200;
-    const ySpacing = 100;
+    const layoutEdgesData: LayoutEdge[] = codeEdges.map(edge => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      type: edge.type,
+      weight: edge.weight,
+    }));
 
-    Object.entries(typeGroups).forEach(([type, groupNodes], typeIndex) => {
-      groupNodes.forEach((node, index) => {
-        const x = (index % 5) * xSpacing;
-        const y = yOffset + Math.floor(index / 5) * ySpacing;
+    // Calculate optimal parameters based on node count
+    const nodeCount = codeNodes.length;
+    const columns = Math.max(5, Math.min(10, Math.ceil(Math.sqrt(nodeCount))));
 
-        layouted.push({
+    // Apply selected layout algorithm with optimized parameters
+    let layoutOptions: Record<string, any>;
+
+    switch (layoutAlgorithm) {
+      case 'force':
+        layoutOptions = {
+          width: 4000,
+          height: 4000,
+          iterations: 200,  // Increased for better convergence
+          repulsionStrength: 8000,  // Stronger repulsion
+          attractionStrength: 0.02,  // Stronger attraction
+          damping: 0.85,
+        };
+        break;
+      case 'hierarchical':
+        layoutOptions = {
+          levelHeight: 200,  // More vertical space
+          nodeSpacing: 250,  // More horizontal space
+          direction: 'TB',
+        };
+        break;
+      case 'grouped':
+        layoutOptions = {
+          groupBy: 'type',
+          groupSpacing: 400,  // More space between groups
+          nodeSpacing: 180,
+          nodesPerRow: Math.max(4, Math.min(8, Math.ceil(nodeCount / 20))),
+        };
+        break;
+      case 'grid':
+      default:
+        layoutOptions = {
+          columns,
+          xSpacing: 250,  // More horizontal space
+          ySpacing: 150,  // More vertical space
+          groupByType: true,
+        };
+        break;
+    }
+
+    const positions = applyLayout(layoutNodesData, layoutEdgesData, layoutAlgorithm, layoutOptions);
+
+    // Convert positions to ReactFlow nodes
+    const positionMap = new Map(positions.map(p => [p.id, p]));
+
+    // IMPORTANT: Only include nodes that have valid positions
+    // This prevents dangling edges from appearing
+    const layouted: Node[] = codeNodes
+      .filter(node => positionMap.has(node.id))  // Only nodes with valid positions
+      .map(node => {
+        const pos = positionMap.get(node.id)!;
+
+        return {
           id: node.id,
           type: 'custom',
-          position: { x, y },
+          position: { x: pos.x, y: pos.y },
           data: {
             label: node.name,
             type: node.type,
@@ -233,23 +323,22 @@ function CodemapContent({
           },
           sourcePosition: Pos.Right,
           targetPosition: Pos.Left,
-        });
+        };
       });
 
-      yOffset += Math.ceil(groupNodes.length / 5) * ySpacing + 50;
-    });
-
+    console.log(`Layout complete: ${layouted.length} nodes positioned`);
     return layouted;
-  }, [Pos]);
+  }, [Pos, layoutAlgorithm]);
 
   // 转换边数据
   const convertEdges = useCallback((codeEdges: CodeEdge[]) => {
-    return codeEdges.map(edge => ({
+    console.log(`Converting ${codeEdges.length} edges for ReactFlow`);
+    const converted = codeEdges.map(edge => ({
       id: edge.id,
       source: edge.source,
       target: edge.target,
       type: 'smoothstep',
-      label: edge.label,
+      label: edge.label || '',  // Handle null labels
       animated: edge.type === 'call',
       style: {
         stroke: EdgeTypeColors[edge.type] || EdgeTypeColors.reference,
@@ -260,15 +349,41 @@ function CodemapContent({
         color: EdgeTypeColors[edge.type] || EdgeTypeColors.reference,
       },
     }));
+    console.log(`First 3 converted edges:`, converted.slice(0, 3));
+    return converted;
   }, [MT]);
 
   // 初始化节点和边
   useEffect(() => {
-    const layoutedNodes = layoutNodes(data.nodes);
-    const convertedEdges = convertEdges(data.edges);
-    setNodes(layoutedNodes);
-    setEdges(convertedEdges);
-  }, [data.nodes, data.edges, layoutNodes, convertEdges, setNodes, setEdges]);
+    console.log('Initializing Codemap with data:', {
+      nodeCount: data.nodes.length,
+      edgeCount: data.edges.length,
+      layoutAlgorithm: layoutAlgorithm,
+      sampleEdge: data.edges[0]
+    });
+
+    // 重要：先清空旧的节点和边，防止切换布局时遗留
+    console.log('Clearing previous layout...');
+    setNodes([]);
+    setEdges([]);
+
+    // 使用setTimeout确保状态清空后再重新布局
+    // 这样可以避免ReactFlow中的边遗留问题
+    const timeoutId = setTimeout(() => {
+      const layoutedNodes = layoutNodes(data.nodes, data.edges);
+      const convertedEdges = convertEdges(data.edges);
+
+      console.log('After conversion:', {
+        layoutedNodesCount: layoutedNodes.length,
+        convertedEdgesCount: convertedEdges.length
+      });
+
+      setNodes(layoutedNodes);
+      setEdges(convertedEdges);
+    }, 10);
+
+    return () => clearTimeout(timeoutId);
+  }, [data.nodes, data.edges, layoutNodes, convertEdges, setNodes, setEdges, layoutAlgorithm]);
 
   // 过滤节点和边
   const filteredNodes = useMemo(() => {
@@ -281,8 +396,41 @@ function CodemapContent({
   }, [nodes, searchTerm, selectedTypes, selectedLanguages]);
 
   const filteredEdges = useMemo(() => {
+    // Get IDs of currently visible nodes
     const filteredNodeIds = new Set(filteredNodes.map((n: any) => n.id));
-    return edges.filter((edge: any) => filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target));
+
+    // Filter edges: both source and target must be in visible nodes
+    const filtered = edges.filter((edge: any) => {
+      const hasSource = filteredNodeIds.has(edge.source);
+      const hasTarget = filteredNodeIds.has(edge.target);
+
+      // Debug: log edges with missing nodes
+      if (!hasSource || !hasTarget) {
+        if (!hasSource && !hasTarget) {
+          console.debug(`Edge ${edge.id}: both nodes missing`);
+        } else if (!hasSource) {
+          console.debug(`Edge ${edge.id}: source node ${edge.source} missing`);
+        } else {
+          console.debug(`Edge ${edge.id}: target node ${edge.target} missing`);
+        }
+      }
+
+      return hasSource && hasTarget;
+    });
+
+    console.log('Filtering edges:', {
+      totalEdges: edges.length,
+      filteredNodesCount: filteredNodes.length,
+      filteredEdgesCount: filtered.length,
+      edgesDropped: edges.length - filtered.length,
+      dropReasons: {
+        bothMissing: edges.filter((e: any) => !filteredNodeIds.has(e.source) && !filteredNodeIds.has(e.target)).length,
+        sourceMissing: edges.filter((e: any) => !filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target)).length,
+        targetMissing: edges.filter((e: any) => filteredNodeIds.has(e.source) && !filteredNodeIds.has(e.target)).length,
+      }
+    });
+
+    return filtered;
   }, [edges, filteredNodes]);
 
   // 更新过滤后的节点和边
@@ -332,10 +480,10 @@ function CodemapContent({
   }, [onNodeClick]);
 
   return (
-    <div className={`flex h-full ${className}`}>
-      <div className="flex flex-col h-full w-full">
+    <div className={`flex h-full w-full ${className}`}>
+      <div className="flex flex-row h-full w-full">
         {/* 侧边栏 */}
-        <div className="w-64 border-r border-[var(--border-color)] bg-[var(--card-bg)] p-4 overflow-y-auto">
+        <div className="w-64 flex-shrink-0 border-r border-[var(--border-color)] bg-[var(--card-bg)] p-4 overflow-y-auto">
           <h3 className="text-lg font-semibold mb-4 text-[var(--foreground)]">代码地图</h3>
 
           {/* 搜索框 */}
@@ -350,6 +498,24 @@ function CodemapContent({
                 className="w-full pl-10 pr-3 py-2 border border-[var(--border-color)] rounded-md bg-[var(--background)] text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-primary)]"
               />
             </div>
+          </div>
+
+          {/* 布局算法选择器 */}
+          <div className="mb-4">
+            <h4 className="text-sm font-medium mb-2 text-[var(--foreground)] flex items-center gap-2">
+              <FaProjectDiagram className="w-3 h-3" />
+              布局算法
+            </h4>
+            <select
+              value={layoutAlgorithm}
+              onChange={e => setLayoutAlgorithm(e.target.value as LayoutAlgorithm)}
+              className="w-full px-3 py-2 border border-[var(--border-color)] rounded-md bg-[var(--background)] text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-primary)]"
+            >
+              <option value="grid">网格布局</option>
+              <option value="force">力导向布局</option>
+              <option value="hierarchical">层次布局</option>
+              <option value="grouped">分组布局</option>
+            </select>
           </div>
 
           {/* 类型过滤 */}
@@ -416,20 +582,33 @@ function CodemapContent({
         </div>
 
         {/* 主可视化区域 */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-w-0 min-h-0">
           <RF
-            // nodes={nodes}
-            // edges={edges}
             nodes={filteredNodes}
-            edges={filteredNodes}
+            edges={filteredEdges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onNodeClick={handleNodeClick}
             nodeTypes={nodeTypes}
             fitView
-            minZoom={0.1}
-            maxZoom={2}
-            defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
+            fitViewOptions={{
+              padding: 0.2,
+              includeHiddenNodes: false,
+              minZoom: 0.1,
+              maxZoom: 1.5,
+            }}
+            minZoom={0.05}
+            maxZoom={3}
+            defaultViewport={{ x: 0, y: 0, zoom: 0.5 }}
+            connectionLineType="smoothstep"
+            defaultEdgeOptions={{
+              type: 'smoothstep',
+              animated: false,
+              style: { strokeWidth: 2 }
+            }}
+            proOptions={{ hideAttribution: true }}
+            deleteKeyCode={null}
+            selectNodesOnDrag={false}
           >
             <Bg />
             <Ctrl />

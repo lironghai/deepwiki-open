@@ -157,19 +157,28 @@ class CodeAnalyzer:
     def analyze(self) -> CodeMap:
         """
         分析整个代码库
-        
+
         Returns:
             CodeMap: 代码地图
         """
         logger.info(f"Starting code analysis for {self.repo_path}")
-        
+
         try:
             # 遍历文件系统
             self._traverse_directory(self.repo_path)
-            
+
             # 分析依赖关系
             self._analyze_dependencies()
-            
+
+            # 添加包含关系（文件包含类和函数）
+            self._add_containment_edges()
+
+            # 添加继承关系
+            self._add_inheritance_edges()
+
+            # 构建调用图（添加函数调用关系）
+            self._build_call_graph()
+
             # 创建元数据
             metadata = {
                 'repo_path': str(self.repo_path),
@@ -179,15 +188,15 @@ class CodeAnalyzer:
                 'node_count': len(self.nodes),
                 'edge_count': len(self.edges)
             }
-            
+
             logger.info(f"Analysis complete: {len(self.nodes)} nodes, {len(self.edges)} edges")
-            
+
             return CodeMap(
                 nodes=self.nodes,
                 edges=self.edges,
                 metadata=metadata
             )
-            
+
         except Exception as e:
             logger.error(f"Error during code analysis: {e}")
             raise
@@ -694,22 +703,26 @@ class CodeAnalyzer:
                 if java_class.get('extends'):
                     parent_class_id = self._resolve_java_type(java_class['extends'], result.get('imports', []))
                     if parent_class_id:
+                        edge_id = f"edge_{class_id}_inherits_{parent_class_id}"
                         self.edges.append(CodeEdge(
+                            id=edge_id,
                             source=class_id,
                             target=parent_class_id,
-                            type=EdgeType.INHERITS,
-                            metadata={'class': java_class['extends']}
+                            type=EdgeType.INHERIT,
+                            label=java_class['extends']
                         ))
                 
                 # 创建实现接口边
                 for interface in java_class.get('implements', []):
                     interface_id = self._resolve_java_type(interface, result.get('imports', []))
                     if interface_id:
+                        edge_id = f"edge_{class_id}_implements_{interface_id}"
                         self.edges.append(CodeEdge(
+                            id=edge_id,
                             source=class_id,
                             target=interface_id,
-                            type=EdgeType.IMPLEMENTS,
-                            metadata={'interface': interface}
+                            type=EdgeType.IMPLEMENT,
+                            label=interface
                         ))
                 
                 # 处理方法
@@ -737,7 +750,9 @@ class CodeAnalyzer:
                     self.nodes.append(method_node)
                     
                     # 创建包含边（类包含方法）
+                    edge_id = f"edge_{class_id}_contains_{method_id}"
                     self.edges.append(CodeEdge(
+                        id=edge_id,
                         source=class_id,
                         target=method_id,
                         type=EdgeType.CONTAINS
@@ -757,15 +772,17 @@ class CodeAnalyzer:
             
             # 创建import边
             for import_item in result.get('imports', []):
-                target_id = self._resolve_import(import_item)
+                target_id = self._resolve_import(import_item, str(file_path))
                 if target_id:
+                    edge_id = f"edge_{parent_node.id}_imports_{target_id}"
                     self.edges.append(CodeEdge(
+                        id=edge_id,
                         source=parent_node.id,
                         target=target_id,
-                        type=EdgeType.IMPORTS,
-                        metadata={'import': import_item}
+                        type=EdgeType.IMPORT,
+                        label=import_item
                     ))
-                    
+
         except Exception as e:
             logger.warning(f"Error analyzing Java file {file_path}: {e}")
     
@@ -849,7 +866,9 @@ class CodeAnalyzer:
                 
                 # 如果是方法，创建包含边
                 if receiver:
+                    edge_id = f"edge_{parent_id}_contains_{func_id}"
                     self.edges.append(CodeEdge(
+                        id=edge_id,
                         source=parent_id,
                         target=func_id,
                         type=EdgeType.CONTAINS
@@ -857,15 +876,17 @@ class CodeAnalyzer:
             
             # 创建import边
             for import_item in result.get('imports', []):
-                target_id = self._resolve_import(import_item)
+                target_id = self._resolve_import(import_item, str(file_path))
                 if target_id:
+                    edge_id = f"edge_{parent_node.id}_imports_{target_id}"
                     self.edges.append(CodeEdge(
+                        id=edge_id,
                         source=parent_node.id,
                         target=target_id,
-                        type=EdgeType.IMPORTS,
-                        metadata={'import': import_item}
+                        type=EdgeType.IMPORT,
+                        label=import_item
                     ))
-                    
+
         except Exception as e:
             logger.warning(f"Error analyzing Go file {file_path}: {e}")
     
@@ -1103,6 +1124,115 @@ class CodeAnalyzer:
                 deps.append(dep)
         
         return deps
+
+    def _add_containment_edges(self):
+        """添加包含关系边（目录包含文件/子目录，文件包含类和函数）"""
+        logger.info("Adding containment edges...")
+
+        # 1. 处理目录包含关系
+        directory_nodes = {node.path: node for node in self.nodes if node.type == NodeType.DIRECTORY}
+        file_nodes = {node.path: node for node in self.nodes if node.type == NodeType.FILE}
+
+        # 目录包含文件和子目录
+        for node in self.nodes:
+            if node.type in [NodeType.DIRECTORY, NodeType.FILE]:
+                # 获取节点的父目录路径
+                node_path = node.path
+                # 查找直接父目录（不是递归查找所有祖先）
+                parent_path = os.path.dirname(node_path)
+
+                # 如果有父目录且父目录存在于节点中
+                if parent_path and parent_path in directory_nodes:
+                    parent_node = directory_nodes[parent_path]
+                    edge_id = f"edge_{parent_node.id}_contains_{node.id}"
+
+                    # 避免重复边
+                    if not any(e.id == edge_id for e in self.edges):
+                        self.edges.append(CodeEdge(
+                            id=edge_id,
+                            source=parent_node.id,
+                            target=node.id,
+                            type=EdgeType.CONTAINS,
+                            label="contains"
+                        ))
+
+        # 2. 处理文件包含类和函数
+        for node in self.nodes:
+            # 类和函数应该被它们的文件包含
+            if node.type in [NodeType.CLASS, NodeType.FUNCTION, NodeType.METHOD, NodeType.INTERFACE]:
+                # 找到包含此节点的文件
+                file_node = file_nodes.get(node.path)
+
+                if file_node:
+                    edge_id = f"edge_{file_node.id}_contains_{node.id}"
+
+                    # 避免重复边
+                    if not any(e.id == edge_id for e in self.edges):
+                        self.edges.append(CodeEdge(
+                            id=edge_id,
+                            source=file_node.id,
+                            target=node.id,
+                            type=EdgeType.CONTAINS,
+                            label="contains"
+                        ))
+
+        logger.info(f"Added containment edges (including directory containment)")
+
+    def _add_inheritance_edges(self):
+        """添加继承关系边"""
+        logger.info("Adding inheritance edges...")
+
+        for node in self.nodes:
+            if node.type != NodeType.CLASS:
+                continue
+
+            # 检查元数据中的基类信息
+            if not node.metadata or 'base_classes' not in node.metadata:
+                continue
+
+            base_classes = node.metadata['base_classes']
+
+            for base_class in base_classes:
+                # 查找基类节点
+                base_node = None
+                for n in self.nodes:
+                    if n.type == NodeType.CLASS and n.name == base_class:
+                        base_node = n
+                        break
+
+                if base_node:
+                    edge_id = f"edge_{node.id}_inherits_{base_node.id}"
+                    self.edges.append(CodeEdge(
+                        id=edge_id,
+                        source=node.id,
+                        target=base_node.id,
+                        type=EdgeType.INHERIT,
+                        label="inherits"
+                    ))
+
+        logger.info(f"Added inheritance edges")
+
+    def _build_call_graph(self):
+        """构建调用图，添加函数调用关系边"""
+        logger.info("Building call graph for edges...")
+
+        try:
+            from api.call_graph_analyzer import CallGraphAnalyzer
+
+            # 创建调用图分析器
+            call_analyzer = CallGraphAnalyzer(self)
+
+            # 构建调用图
+            call_analyzer.build_call_graph()
+
+            # 注意：CallGraphAnalyzer.build_call_graph() 已经将边添加到 self.edges
+            # 所以我们不需要手动添加
+
+            logger.info(f"Call graph built and edges added")
+
+        except Exception as e:
+            logger.warning(f"Failed to build call graph: {e}")
+            # 即使调用图构建失败，也继续其他分析
 
 
 def analyze_repository(repo_path: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

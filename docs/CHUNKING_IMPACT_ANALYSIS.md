@@ -450,3 +450,6 @@ CODE_FILE_MAX = MAX_EMBEDDING_TOKENS * 10  # 81,920 tokens
 **状态**: ✅ 已验证  
 **结论**: **分块不影响Codemap和Wiki功能**
 
+
+
+

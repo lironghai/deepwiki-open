@@ -56,6 +56,8 @@ const Ask: React.FC<AskProps> = ({
   const [response, setResponse] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [deepResearch, setDeepResearch] = useState(false);
+  const [useCodemap, setUseCodemap] = useState(false);
+  const [codemapReferencedNodes, setCodemapReferencedNodes] = useState<any[]>([]);
 
   // Model selection state
   const [selectedProvider, setSelectedProvider] = useState(provider);
@@ -537,8 +539,59 @@ const Ask: React.FC<AskProps> = ({
     handleConfirmAsk();
   };
 
+  // Handle codemap-enhanced chat
+  const handleCodemapChat = async () => {
+    setIsLoading(true);
+    setResponse('');
+    setCodemapReferencedNodes([]);
+
+    try {
+      // Use Next.js API route proxy to backend
+      const apiResponse = await fetch('/api/chat/codemap', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          repo_url: getRepoUrl(repoInfo),
+          type: repoInfo.type,
+          question: question,
+          provider: selectedProvider,
+          model: isCustomSelectedModel ? customSelectedModel : selectedModel,
+          language: language,
+          token: repoInfo?.token
+        })
+      });
+
+      if (!apiResponse.ok) {
+        throw new Error(`API error: ${apiResponse.status}`);
+      }
+
+      const data = await apiResponse.json();
+      setResponse(data.answer);
+      setCodemapReferencedNodes(data.referenced_nodes || []);
+
+      // Update conversation history
+      setConversationHistory([
+        { role: 'user', content: question },
+        { role: 'assistant', content: data.answer }
+      ]);
+
+      setIsLoading(false);
+    } catch (error) {
+      console.error('Error during Codemap chat:', error);
+      setResponse('Error: Failed to get a response with Codemap integration. Please try again.');
+      setIsLoading(false);
+    }
+  };
+
   // Handle confirm and send request
   const handleConfirmAsk = async () => {
+    // If Codemap integration is enabled, use codemap-specific handler
+    if (useCodemap) {
+      return handleCodemapChat();
+    }
+
     setIsLoading(true);
     setResponse('');
     setResearchIteration(0);
@@ -690,6 +743,43 @@ const Ask: React.FC<AskProps> = ({
             </button>
           </div>
 
+          {/* Codemap Integration toggle */}
+          <div className="flex items-center mt-2 justify-between">
+            <div className="group relative">
+              <label className="flex items-center cursor-pointer">
+                <span className="text-xs text-gray-600 dark:text-gray-400 mr-2">Codemap Integration</span>
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={useCodemap}
+                    onChange={() => setUseCodemap(!useCodemap)}
+                    className="sr-only"
+                  />
+                  <div className={`w-10 h-5 rounded-full transition-colors ${useCodemap ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}></div>
+                  <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform transform ${useCodemap ? 'translate-x-5' : ''}`}></div>
+                </div>
+              </label>
+              <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-gray-800 text-white text-xs rounded p-2 w-72 z-10">
+                <div className="relative">
+                  <div className="absolute -bottom-2 left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
+                  <p className="mb-1">Codemap Integration enhances responses with code structure understanding:</p>
+                  <ul className="list-disc pl-4 text-xs">
+                    <li><strong>Structure-Aware:</strong> AI understands your codebase architecture</li>
+                    <li><strong>Context-Rich:</strong> Provides answers with relevant code references</li>
+                    <li><strong>Smart Navigation:</strong> Highlights referenced nodes and functions</li>
+                    <li><strong>Dependency Insights:</strong> Shows relationships between components</li>
+                  </ul>
+                  <p className="mt-1 text-xs italic">Powered by AI-enhanced code analysis and RAG</p>
+                </div>
+              </div>
+            </div>
+            {useCodemap && (
+              <div className="text-xs text-blue-600 dark:text-blue-400">
+                Code structure analysis enabled
+              </div>
+            )}
+          </div>
+
           {/* Deep Research toggle */}
           <div className="flex items-center mt-2 justify-between">
             <div className="group relative">
@@ -740,6 +830,29 @@ const Ask: React.FC<AskProps> = ({
             >
               <Markdown content={response} />
             </div>
+
+            {/* Referenced codemap nodes */}
+            {useCodemap && codemapReferencedNodes.length > 0 && (
+              <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-gray-800">
+                <h4 className="text-sm font-semibold mb-2 text-blue-700 dark:text-blue-400">
+                  Referenced Code Nodes ({codemapReferencedNodes.length})
+                </h4>
+                <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                  {codemapReferencedNodes.map((node, index) => (
+                    <div key={index} className="text-xs bg-white dark:bg-gray-900 p-2 rounded border border-blue-200 dark:border-blue-900">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-blue-700 dark:text-blue-400">{node.name}</span>
+                        <span className="text-gray-500 dark:text-gray-400">({node.type})</span>
+                      </div>
+                      <div className="text-gray-600 dark:text-gray-400 mt-1">{node.path}</div>
+                      {node.description && (
+                        <div className="text-gray-500 dark:text-gray-500 mt-1 italic">{node.description}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Research navigation and clear button */}
             <div className="p-2 flex justify-between items-center border-t border-gray-200 dark:border-gray-700">

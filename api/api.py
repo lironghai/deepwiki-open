@@ -72,6 +72,7 @@ class RepoInfo(BaseModel):
     token: Optional[str] = None
     localPath: Optional[str] = None
     repoUrl: Optional[str] = None
+    branch: Optional[str] = None
 
 
 class WikiSection(BaseModel):
@@ -412,6 +413,10 @@ app.add_websocket_route("/ws/chat", handle_websocket_chat)
 # Import and add MCP routes
 from api.mcp_server import get_mcp_app
 app.include_router(get_mcp_app())
+
+# Import and add Codemap routes
+from api.codemap_endpoints import router as codemap_router
+app.include_router(codemap_router)
 
 # --- Wiki Cache Helper Functions ---
 

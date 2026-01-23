@@ -9,9 +9,10 @@ import ErrorBoundary from './ErrorBoundary';
 
 interface MarkdownProps {
   content: string;
+  generateFileUrl?: (filePath: string, lineNumber?: string) => string; // Optional: Function to generate file URLs
 }
 
-const Markdown: React.FC<MarkdownProps> = ({ content }) => {
+const Markdown: React.FC<MarkdownProps> = ({ content, generateFileUrl }) => {
   // Define markdown components
   const MarkdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
     p({ children, ...props }: { children?: React.ReactNode }) {
@@ -59,9 +60,31 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
       return <li className="mb-2 text-sm leading-relaxed dark:text-white" {...props}>{children}</li>;
     },
     a({ children, href, ...props }: { children?: React.ReactNode; href?: string }) {
+      // Process href for source file citations
+      // Format: [filename.ext:line]() or [filename.ext:start-end]() or [path/to/file.ext]()
+      let processedHref = href;
+
+      if (generateFileUrl && children && typeof children === 'string') {
+        // Check if this is a source citation format
+        const citationMatch = children.match(/^([^:]+):?(\d+(?:-\d+)?)?$/);
+        if (citationMatch && (!href || href === '')) {
+          const filePath = citationMatch[1];
+          const lineInfo = citationMatch[2];
+
+          // Generate the proper URL
+          if (lineInfo) {
+            // Extract line number (use first line if it's a range)
+            const lineNumber = lineInfo.split('-')[0];
+            processedHref = `${generateFileUrl(filePath)}#L${lineNumber}`;
+          } else {
+            processedHref = generateFileUrl(filePath);
+          }
+        }
+      }
+
       return (
         <a
-          href={href}
+          href={processedHref}
           className="text-purple-600 dark:text-purple-400 hover:underline font-medium"
           target="_blank"
           rel="noopener noreferrer"
@@ -139,7 +162,8 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
               <Mermaid
                 chart={codeContent}
                 className="w-full max-w-full"
-                zoomingEnabled={true}
+                zoomingEnabled={false}
+                showCodeToggle={true}
               />
             </div>
           </ErrorBoundary>

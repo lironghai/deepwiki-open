@@ -70,3 +70,4 @@ certs/
 deployment.yaml
 deployment.yaml.bak
 yarn.lock
+/temp/

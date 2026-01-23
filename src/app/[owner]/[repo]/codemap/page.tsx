@@ -192,10 +192,32 @@ export default function CodemapPage() {
   const handleNodeClick = useCallback(
     (node: CodeNode) => {
       console.log('Node clicked:', node);
-      
+
       // 如果有仓库URL，构造文件跳转链接
       if (codemapData?.metadata.repo_url && node.type === 'file') {
-        const fileUrl = `${codemapData.metadata.repo_url}/blob/main/${node.path}`;
+        // 移除可能的.git后缀
+        let cleanRepoUrl = codemapData.metadata.repo_url;
+        if (cleanRepoUrl.endsWith('.git')) {
+          cleanRepoUrl = cleanRepoUrl.slice(0, -4);
+        }
+
+        // 根据仓库类型构造正确的URL格式
+        let fileUrl: string;
+        // 从metadata中获取分支名，如果没有则使用常见的默认分支名
+        // GitLab和Bitbucket通常是master，GitHub通常是main
+        const branch = (codemapData.metadata as any).branch || (repoType === 'github' ? 'main' : 'master');
+
+        if (repoType === 'gitlab') {
+          // GitLab格式: {repo_url}/-/blob/{branch}/{path}
+          fileUrl = `${cleanRepoUrl}/-/blob/${branch}/${node.path}`;
+        } else if (repoType === 'bitbucket') {
+          // BitBucket格式: {repo_url}/src/{branch}/{path}
+          fileUrl = `${cleanRepoUrl}/src/${branch}/${node.path}`;
+        } else {
+          // GitHub格式: {repo_url}/blob/{branch}/{path}
+          fileUrl = `${cleanRepoUrl}/blob/${branch}/${node.path}`;
+        }
+
         if (node.start_line) {
           window.open(`${fileUrl}#L${node.start_line}`, '_blank');
         } else {
@@ -203,7 +225,7 @@ export default function CodemapPage() {
         }
       }
     },
-    [codemapData]
+    [codemapData, repoType]
   );
 
   // 导出代码地图数据
@@ -223,9 +245,9 @@ export default function CodemapPage() {
   }, [codemapData, owner, repo]);
 
   return (
-    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
+    <div className="flex flex-col h-screen bg-[var(--background)] text-[var(--foreground)] overflow-hidden">
       {/* 顶部导航栏 */}
-      <header className="border-b border-[var(--border-color)] bg-[var(--card-bg)]">
+      <header className="flex-shrink-0 border-b border-[var(--border-color)] bg-[var(--card-bg)]">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
@@ -288,7 +310,7 @@ export default function CodemapPage() {
       </header>
 
       {/* 主内容区 */}
-      <main className="h-[calc(100vh-8rem)]">
+      <main className="flex-1 min-h-0 overflow-hidden">
         {isLoading ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">

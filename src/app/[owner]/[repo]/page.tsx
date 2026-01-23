@@ -221,8 +221,9 @@ export default function RepoWikiPage() {
     type: repoType,
     token: token || null,
     localPath: localPath || null,
-    repoUrl: repoUrl || null
-  }), [owner, repo, repoType, localPath, repoUrl, token]);
+    repoUrl: repoUrl || null,
+    branch: branchParam || null
+  }), [owner, repo, repoType, localPath, repoUrl, token, branchParam]);
 
   // State variables
   const [isLoading, setIsLoading] = useState(true);
@@ -294,24 +295,30 @@ export default function RepoWikiPage() {
       return filePath;
     }
 
-    const repoUrl = effectiveRepoInfo.repoUrl;
+    let repoUrl = effectiveRepoInfo.repoUrl;
     if (!repoUrl) {
       return filePath;
     }
 
+    const branch = effectiveRepoInfo.branch || defaultBranch;
     try {
       const url = new URL(repoUrl);
       const hostname = url.hostname;
-      
+
       if (hostname === 'github.com' || hostname.includes('github')) {
         // GitHub URL format: https://github.com/owner/repo/blob/branch/path
-        return `${repoUrl}/blob/${defaultBranch}/${filePath}`;
-      } else if (hostname === 'gitlab.com' || hostname.includes('gitlab')) {
+        return `${repoUrl}/blob/${branch}/${filePath}`;
+      } else if (hostname === 'gitlab.com' || hostname.includes('gitlab') || hostname === 'git.ljdong.net' || hostname.includes('ljdong')) {
         // GitLab URL format: https://gitlab.com/owner/repo/-/blob/branch/path
-        return `${repoUrl}/-/blob/${defaultBranch}/${filePath}`;
+        // 如果有仓库URL，构造文件跳转链接
+          // 移除可能的.git后缀
+          if (repoUrl.endsWith('.git')) {
+            repoUrl = repoUrl.slice(0, -4);
+          }
+        return `${repoUrl}/-/blob/${branch}/${filePath}`;
       } else if (hostname === 'bitbucket.org' || hostname.includes('bitbucket')) {
         // Bitbucket URL format: https://bitbucket.org/owner/repo/src/branch/path
-        return `${repoUrl}/src/${defaultBranch}/${filePath}`;
+        return `${repoUrl}/src/${branch}/${filePath}`;
       }
     } catch (error) {
       console.warn('Error generating file URL:', error);
@@ -320,6 +327,53 @@ export default function RepoWikiPage() {
     // Fallback to just the file path
     return filePath;
   }, [effectiveRepoInfo, defaultBranch]);
+
+  // Helper function to fill empty source citation URLs
+  const fillSourceUrls = useCallback((content: string): string => {
+    // Match patterns like [filename.ext:lines]() or [filename.ext]() with empty parentheses
+    const sourcePattern = /\[([^\]]+?\.[\w]+(?::\d+(?:-\d+)?)?)\]\(\)/g;
+
+    return content.replace(sourcePattern, (match, fileRef) => {
+      // Extract file path (before colon if line numbers exist)
+      const colonIndex = fileRef.indexOf(':');
+      const filePath = colonIndex >= 0 ? fileRef.substring(0, colonIndex) : fileRef;
+      const lineInfo = colonIndex >= 0 ? fileRef.substring(colonIndex) : '';
+
+      // Generate the file URL
+      const fileUrl = generateFileUrl(filePath);
+
+      // Add line number anchor for GitHub/GitLab if line numbers are present
+      let fullUrl = fileUrl;
+      if (lineInfo && effectiveRepoInfo.type !== 'local') {
+        const lineMatch = lineInfo.match(/:(\d+)(?:-(\d+))?/);
+        if (lineMatch) {
+          const startLine = lineMatch[1];
+          const endLine = lineMatch[2] || startLine;
+
+          try {
+            const url = new URL(effectiveRepoInfo.repoUrl || '');
+            const hostname = url.hostname;
+
+            if (hostname === 'github.com' || hostname.includes('github')) {
+              // GitHub format: #L1-L10
+              fullUrl = `${fileUrl}#L${startLine}${endLine !== startLine ? `-L${endLine}` : ''}`;
+            } else if (hostname === 'gitlab.com' || hostname.includes('gitlab') || hostname === 'git.ljdong.net' || hostname.includes('ljdong')) {
+              // GitLab format: #L1-10
+              fullUrl = `${fileUrl}#L${startLine}${endLine !== startLine ? `-${endLine}` : ''}`;
+            } else if (hostname === 'bitbucket.org' || hostname.includes('bitbucket')) {
+              // Bitbucket format: #lines-1:10
+              fullUrl = `${fileUrl}#lines-${startLine}${endLine !== startLine ? `:${endLine}` : ''}`;
+            }
+          } catch (error) {
+            // If URL parsing fails, just use the file URL without line anchors
+            console.warn('Error adding line anchors:', error);
+          }
+        }
+      }
+
+      return `[${fileRef}](${fullUrl})`;
+    });
+  }, [generateFileUrl, effectiveRepoInfo]);
 
   // Memoize repo info to avoid triggering updates in callbacks
 
@@ -548,8 +602,29 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
            - critical CriticalText ... option ... end (for critical regions)
            - break BreakText ... end (for breaking flows/exceptions)
          - Add notes for clarification: "Note over A,B: Description", "Note right of A: Detail"
-         - Use autonumber directive to add sequence numbers to messages
-         - NEVER use flowchart-style labels like A--|label|-->B. Always use a colon for labels: A->>B: My Label
+         - Use autonumber directive to add sequence numbers to messages (standalone on its own line)
+         - **CRITICAL MERMAID SYNTAX RULES - MUST FOLLOW TO AVOID PARSING ERRORS**:
+           * **NEVER use commas followed by square brackets** after Mermaid keywords or in arrow labels
+           * **WRONG**: "autonumber, [service-name]" or "autonumber    , [text] description"
+           * **CORRECT**: "autonumber" (standalone keyword only)
+           * **WRONG**: "participant User, [description]" or "User->>Service: Message, [note]"
+           * **CORRECT**: "participant User" and "User->>Service: Message description" (no commas/brackets)
+           * **WRONG**: "activate Service, [text]" or "deactivate, [cleanup] Service"
+           * **CORRECT**: "activate Service" and "deactivate Service" (standalone keywords)
+           * Place any annotations or notes OUTSIDE the diagram as regular text or use proper Note syntax
+         - ALWAYS use a colon for arrow labels: A->>B: My Label
+         - NEVER use flowchart-style labels like A--|label|-->B
+         - **ADDITIONAL CRITICAL SYNTAX RULES FOR ALL MERMAID DIAGRAMS**:
+           * **NEVER use commas in arrow labels**: Use colons only, e.g., "A->>B: Label text" not "A->>B: Label, note"
+           * **NEVER add trailing commas or brackets after keywords**: Keywords like "autonumber", "activate", "deactivate", "loop", "alt", "opt", "par", "end" must be standalone
+           * **NEVER mix Markdown syntax with Mermaid syntax**: No markdown links, bold, italic, or code formatting inside diagram code
+           * **ALWAYS validate participant names**: Use simple alphanumeric names or underscores, avoid special characters
+           * **ALWAYS close structural blocks properly**: Every "loop", "alt", "opt", "par", "box" must have a matching "end"
+           * **ALWAYS use proper indentation**: Indent content inside structural blocks for readability (2 spaces recommended)
+           * **For flowchart diagrams**: Use "graph TD" or "flowchart TD" (top-down), node IDs must be simple (alphanumeric, no spaces), use proper arrow syntax: --> or ---
+           * **For class diagrams**: Use "classDiagram", define classes with "class ClassName", use proper relationship syntax: -->, <|--, <|.., *--, o--
+           * **For ER diagrams**: Use "erDiagram", define entities with "EntityName {", use proper relationship syntax: ||--||, ||--o{, o}--||
+           * **TEST YOUR DIAGRAM**: Before including, mentally validate that the syntax follows Mermaid specification exactly - no extra commas, brackets, or markdown syntax
 
 4.  **Tables:**
     *   Use Markdown tables to summarize information such as:
@@ -712,6 +787,9 @@ Remember:
         // Clean up markdown delimiters
         content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
 
+        // Fill empty source citation URLs with proper repository file links
+        content = fillSourceUrls(content);
+
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
 
         // Store the FINAL generated content
@@ -746,7 +824,7 @@ Remember:
         setLoadingMessage(undefined); // Clear specific loading message
       }
     });
-  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl]);
+  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, language, activeContentRequests, generateFileUrl, fillSourceUrls, codemapSummary]);
 
   // Helper function to check repository embedding status
   const checkRepoStatus = useCallback(async (repoUrl: string, repoType: string, token: string): Promise<{
