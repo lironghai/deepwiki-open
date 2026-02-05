@@ -15,7 +15,8 @@
     "fetchingStructure": "获取仓库结构...",
     "determiningStructure": "验证Wiki结构...",
     "clearingCache": "清除服务器缓存...",
-    "preparingDownload": "请等待，我们正在准备您的下载..."
+    "preparingDownload": "请等待，我们正在准备您的下载...",
+    "preparingRepo": "正在准备仓库（克隆 + 嵌入处理）..."
   },
   "home": {
     "welcome": "欢迎使用DeepWiki",
@@ -80,6 +81,11 @@
     "defaultNote": "这些默认配置已经被应用。请在上方添加您的自定义排除项。",
     "hideDefault": "隐藏默认配置",
     "viewDefault": "查看默认配置",
+    "branch": "分支",
+    "branchPlaceholder": "输入分支名称（默认：main/master）",
+    "branchHint": "留空则使用默认分支",
+    "defaultBranch": "默认",
+    "branchesFound": "找到 {count} 个分支",
     "authorizationCode": "授权码",
     "authorizationRequired": "生成wiki页面需要填写授权码"
   },

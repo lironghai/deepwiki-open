@@ -3,15 +3,32 @@
  * This replaces the HTTP streaming endpoint with a WebSocket connection
  */
 
-// Get the server base URL from environment or use default
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-
-// Convert HTTP URL to WebSocket URL
-const getWebSocketUrl = () => {
-  const baseUrl = SERVER_BASE_URL;
-  // Replace http:// with ws:// or https:// with wss://
-  const wsBaseUrl = baseUrl.replace(/^http/, 'ws');
-  return `${wsBaseUrl}/ws/chat`;
+/**
+ * 获取 WebSocket URL
+ * 优先使用环境变量，否则动态从当前页面 URL 构建
+ * 这样可以确保在生产环境中正确连接到后端
+ */
+export const getWebSocketUrl = (path: string = '/ws/chat') => {
+  // 在服务端渲染时使用环境变量
+  if (typeof window === 'undefined') {
+    const baseUrl = process.env.WS_SERVER_BASE_URL || 'http://localhost:8001';
+    const wsBaseUrl = baseUrl.replace(/^https/, 'wss').replace(/^http/, 'ws');
+    return `${wsBaseUrl}${path}`;
+  }
+  
+  // 在客户端使用当前页面的域名（假设前端和后端在同一域名下通过代理）
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.host;
+  
+  // 检查是否有环境变量配置的后端地址（需要 NEXT_PUBLIC_ 前缀才能在客户端访问）
+  const envBaseUrl = process.env.NEXT_PUBLIC_WS_SERVER_URL;
+  if (envBaseUrl) {
+    const wsBaseUrl = envBaseUrl.replace(/^https/, 'wss').replace(/^http/, 'ws');
+    return `${wsBaseUrl}${path}`;
+  }
+  
+  // 默认使用当前域名
+  return `${protocol}//${host}${path}`;
 };
 
 export interface ChatMessage {
@@ -47,7 +64,9 @@ export const createChatWebSocket = (
   onClose: () => void
 ): WebSocket => {
   // Create WebSocket connection
-  const ws = new WebSocket(getWebSocketUrl());
+  const wsUrl = getWebSocketUrl('/ws/chat');
+  console.log('Connecting to WebSocket:', wsUrl);
+  const ws = new WebSocket(wsUrl);
   
   // Set up event handlers
   ws.onopen = () => {

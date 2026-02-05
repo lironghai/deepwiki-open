@@ -102,7 +102,7 @@ export default function ProcessedProjects({
   };
 
   const handleDelete = async (project: ProcessedProject) => {
-    if (!confirm(`Are you sure you want to delete project ${project.name}?`)) {
+    if (!confirm(`Are you sure you want to delete project ${project.name}? This will remove all data including wiki caches (all languages), codemap, repository files, and database.`)) {
       return;
     }
     try {
@@ -113,14 +113,16 @@ export default function ProcessedProjects({
           owner: project.owner,
           repo: project.repo,
           repo_type: project.repo_type,
-          language: project.language,
         }),
       });
       if (!response.ok) {
         const errorBody = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(errorBody.error || response.statusText);
       }
-      setProjects(prev => prev.filter(p => p.id !== project.id));
+      // Remove all entries for this project (all languages) since the API deletes everything
+      setProjects(prev => prev.filter(p =>
+        !(p.owner === project.owner && p.repo === project.repo && p.repo_type === project.repo_type)
+      ));
     } catch (e: unknown) {
       console.error('Failed to delete project:', e);
       alert(`Failed to delete project: ${e instanceof Error ? e.message : 'Unknown error'}`);

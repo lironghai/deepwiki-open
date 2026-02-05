@@ -15,7 +15,8 @@
       "fetchingStructure": "Récupération de la structure du dépôt...",
       "determiningStructure": "Détermination de la structure du wiki...",
       "clearingCache": "Nettoyage du cache serveur...",
-      "preparingDownload": "Veuillez patienter pendant que nous préparons votre téléchargement..."
+      "preparingDownload": "Veuillez patienter pendant que nous préparons votre téléchargement...",
+      "preparingRepo": "Préparation du dépôt (clonage + embedding)..."
     },
     "home": {
       "welcome": "Bienvenue sur DeepWiki-Open",
@@ -89,7 +90,12 @@
       "includeMode": "Inclure uniquement ces chemins",
       "excludeModeDescription": "Spécifie les chemins à exclure du traitement (comportement par défaut)",
       "includeModeDescription": "Spécifie uniquement les chemins à inclure, en ignorant les autres",
-      "authorizationCode": "Code d’autorisation",
+      "branch": "Branche",
+      "branchPlaceholder": "Entrez le nom de la branche (par défaut : main/master)",
+      "branchHint": "Laisser vide pour utiliser la branche par défaut",
+      "defaultBranch": "par défaut",
+      "branchesFound": "{count} branches trouvées",
+      "authorizationCode": "Code d'autorisation",
       "authorizationRequired": "Une authentification est requise pour générer le wiki."
     },
     "footer": {

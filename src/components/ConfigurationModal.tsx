@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useLanguage } from '@/contexts/LanguageContext';
 import UserSelector from './UserSelector';
 import TokenInput from './TokenInput';
@@ -38,6 +38,10 @@ interface ConfigurationModalProps {
   // Access token
   accessToken: string;
   setAccessToken: (value: string) => void;
+
+  // Branch selection
+  selectedBranch: string;
+  setSelectedBranch: (value: string) => void;
 
   // File filter options
   excludedDirs: string;
@@ -81,6 +85,8 @@ export default function ConfigurationModal({
   setSelectedPlatform,
   accessToken,
   setAccessToken,
+  selectedBranch,
+  setSelectedBranch,
   excludedDirs,
   setExcludedDirs,
   excludedFiles,
@@ -100,6 +106,68 @@ export default function ConfigurationModal({
 
   // Show token section state
   const [showTokenSection, setShowTokenSection] = useState(false);
+
+  // Branch selection state
+  const [branches, setBranches] = useState<string[]>([]);
+  const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
+  const [isFetchingBranches, setIsFetchingBranches] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
+
+  // Fetch branches when modal opens or repository/token changes
+  useEffect(() => {
+    const fetchBranches = async () => {
+      if (!isOpen || !repositoryInput) return;
+
+      // Check if it's a valid remote repository URL
+      const isRemoteRepo = repositoryInput.startsWith('http://') || repositoryInput.startsWith('https://');
+      if (!isRemoteRepo) {
+        // For local repositories, don't fetch branches
+        setBranches([]);
+        setDefaultBranch(null);
+        return;
+      }
+
+      setIsFetchingBranches(true);
+      setBranchError(null);
+
+      try {
+        const response = await fetch('/api/repo/branches', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            repo_url: repositoryInput,
+            repo_type: selectedPlatform,
+            token: accessToken || undefined,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setBranches(data.branches || []);
+          setDefaultBranch(data.default_branch || null);
+          
+          // Auto-select default branch if no branch is selected
+          if (!selectedBranch && data.default_branch) {
+            setSelectedBranch(data.default_branch);
+          }
+        } else {
+          const errorData = await response.json();
+          setBranchError(errorData.error || 'Failed to fetch branches');
+          console.error('Failed to fetch branches:', errorData);
+        }
+      } catch (error) {
+        console.error('Error fetching branches:', error);
+        setBranchError('Network error while fetching branches');
+      } finally {
+        setIsFetchingBranches(false);
+      }
+    };
+
+    fetchBranches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, repositoryInput, selectedPlatform, accessToken]);
 
   if (!isOpen) return null;
 
@@ -206,6 +274,62 @@ export default function ConfigurationModal({
                   )}
                 </button>
               </div>
+            </div>
+
+            {/* Branch Selection */}
+            <div className="mb-4">
+              <label htmlFor="branch-select" className="block text-sm font-medium text-[var(--foreground)] mb-2">
+                {t.form?.branch || 'Branch'}
+                {isFetchingBranches && (
+                  <span className="ml-2 text-xs text-[var(--muted)]">
+                    ({t.common?.loading || 'Loading...'})
+                  </span>
+                )}
+              </label>
+              
+              {branches.length > 0 ? (
+                <select
+                  id="branch-select"
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  className="input-japanese block w-full px-3 py-2 text-sm rounded-md bg-transparent text-[var(--foreground)] focus:outline-none focus:border-[var(--accent-primary)]"
+                  disabled={isFetchingBranches}
+                >
+                  {branches.map((branch) => (
+                    <option key={branch} value={branch}>
+                      {branch}{branch === defaultBranch ? ` (${t.form?.defaultBranch || 'default'})` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="branch-select"
+                  type="text"
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  placeholder={t.form?.branchPlaceholder || 'Enter branch name (default: main/master)'}
+                  className="input-japanese block w-full px-3 py-2 text-sm rounded-md bg-transparent text-[var(--foreground)] focus:outline-none focus:border-[var(--accent-primary)]"
+                  disabled={isFetchingBranches}
+                />
+              )}
+              
+              {branchError && (
+                <div className="text-xs text-[var(--highlight)] mt-1">
+                  {branchError}
+                </div>
+              )}
+              
+              {!branchError && !isFetchingBranches && branches.length === 0 && (
+                <div className="text-xs text-[var(--muted)] mt-1">
+                  {t.form?.branchHint || 'Leave empty to use the default branch'}
+                </div>
+              )}
+              
+              {branches.length > 0 && (
+                <div className="text-xs text-[var(--muted)] mt-1">
+                  {t.form?.branchesFound?.replace('{count}', branches.length.toString()) || `Found ${branches.length} branches`}
+                </div>
+              )}
             </div>
 
             {/* Model Selector */}

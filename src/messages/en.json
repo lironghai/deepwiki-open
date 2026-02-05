@@ -15,7 +15,8 @@
     "fetchingStructure": "Fetching repository structure...",
     "determiningStructure": "Determining wiki structure...",
     "clearingCache": "Clearing server cache...",
-    "preparingDownload": "Please wait while we prepare your download..."
+    "preparingDownload": "Please wait while we prepare your download...",
+    "preparingRepo": "Preparing repository (clone + embedding)..."
   },
   "home": {
     "welcome": "Welcome to DeepWiki-Open",
@@ -89,6 +90,11 @@
     "includeMode": "Include Only Paths",
     "excludeModeDescription": "Specify paths to exclude from processing (default behavior)",
     "includeModeDescription": "Specify only the paths to include, ignoring all others",
+    "branch": "Branch",
+    "branchPlaceholder": "Enter branch name (default: main/master)",
+    "branchHint": "Leave empty to use the default branch",
+    "defaultBranch": "default",
+    "branchesFound": "Found {count} branches",
     "authorizationCode": "Authorization Code",
     "authorizationRequired": "Authentication is required to generate the wiki."
   },

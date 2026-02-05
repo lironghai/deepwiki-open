@@ -73,6 +73,8 @@ if __name__ == "__main__":
         "api.api:app",
         host="0.0.0.0",
         port=port,
+        workers=4,
+        access_log=False,
         reload=is_development,
         reload_excludes=["**/logs/*", "**/__pycache__/*", "**/*.pyc"] if is_development else None,
     )

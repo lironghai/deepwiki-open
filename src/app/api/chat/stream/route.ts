@@ -1,23 +1,103 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // The target backend server base URL, derived from environment variable or defaulted.
-// This should match the logic in your frontend's page.tsx for consistency.
 const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
+
+// 配置参数
+const MAX_RETRIES = 3;           // 最大重试次数
+const RETRY_DELAY_MS = 2000;     // 重试间隔（毫秒）
+const REQUEST_TIMEOUT_MS = 30000; // 请求超时时间（毫秒）
+
+/**
+ * 带超时的 fetch 请求
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * 带重试的 fetch 请求
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries: number = MAX_RETRIES,
+  retryDelayMs: number = RETRY_DELAY_MS,
+  timeoutMs: number = REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Attempt ${attempt}/${maxRetries} to connect to backend...`);
+      const response = await fetchWithTimeout(url, options, timeoutMs);
+      console.log(`Successfully connected to backend on attempt ${attempt}`);
+      return response;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      
+      // 检查是否是超时或连接错误
+      const isRetryable = 
+        lastError.name === 'AbortError' || 
+        lastError.message.includes('fetch failed') ||
+        lastError.message.includes('ECONNREFUSED') ||
+        lastError.message.includes('timeout') ||
+        (lastError.cause && typeof lastError.cause === 'object' && 
+         'code' in lastError.cause && 
+         (lastError.cause.code === 'UND_ERR_HEADERS_TIMEOUT' || 
+          lastError.cause.code === 'ECONNREFUSED'));
+
+      if (!isRetryable || attempt === maxRetries) {
+        console.error(`Failed after ${attempt} attempts:`, lastError.message);
+        throw lastError;
+      }
+
+      console.log(`Attempt ${attempt} failed, retrying in ${retryDelayMs}ms...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  throw lastError || new Error('Unknown error during fetch');
+}
 
 // This is a fallback HTTP implementation that will be used if WebSockets are not available
 // or if there's an error with the WebSocket connection
 export async function POST(req: NextRequest) {
   try {
-    const requestBody = await req.json(); // Assuming the frontend sends JSON
+    const requestBody = await req.json();
 
-    // Note: This endpoint now uses the HTTP fallback instead of WebSockets
-    // The WebSocket implementation is in src/utils/websocketClient.ts
-    // This HTTP endpoint is kept for backward compatibility
     console.log('Using HTTP fallback for chat completion instead of WebSockets');
 
     const targetUrl = `${TARGET_SERVER_BASE_URL}/chat/completions/stream`;
 
-    // Make the actual request to the backend service
+    // 使用带重试的 fetch
+    // const backendResponse = await fetchWithRetry(
+    //   targetUrl,
+    //   {
+    //     method: 'POST',
+    //     headers: {
+    //       'Content-Type': 'application/json',
+    //       'Accept': 'text/event-stream',
+    //     },
+    //     body: JSON.stringify(requestBody),
+    //   }
+    // );
+
     const backendResponse = await fetch(targetUrl, {
       method: 'POST',
       headers: {
@@ -63,7 +143,7 @@ export async function POST(req: NextRequest) {
           controller.error(error);
         } finally {
           controller.close();
-          reader.releaseLock(); // Important to release the lock on the reader
+          reader.releaseLock();
         }
       },
       cancel(reason) {
@@ -73,41 +153,53 @@ export async function POST(req: NextRequest) {
 
     // Set up headers for the response to the client
     const responseHeaders = new Headers();
-    // Copy the Content-Type from the backend response (e.g., 'text/event-stream')
     const contentType = backendResponse.headers.get('Content-Type');
     if (contentType) {
       responseHeaders.set('Content-Type', contentType);
     }
-    // It's good practice for streams not to be cached or transformed by intermediaries.
     responseHeaders.set('Cache-Control', 'no-cache, no-transform');
 
     return new NextResponse(stream, {
-      status: backendResponse.status, // Should be 200 for a successful stream start
+      status: backendResponse.status,
       headers: responseHeaders,
     });
 
   } catch (error) {
     console.error('Error in API proxy route (/api/chat/stream):', error);
+    
     let errorMessage = 'Internal Server Error in proxy';
+    let statusCode = 500;
+    
     if (error instanceof Error) {
       errorMessage = error.message;
+      
+      // 如果是超时错误，返回 503 Service Unavailable
+      if (error.name === 'AbortError' || 
+          errorMessage.includes('timeout') ||
+          errorMessage.includes('fetch failed')) {
+        statusCode = 503;
+        errorMessage = 'Backend service is busy or unavailable. Please try again later.';
+      }
     }
-    return new NextResponse(JSON.stringify({ error: errorMessage }), {
-      status: 500,
+    
+    return new NextResponse(JSON.stringify({ 
+      error: errorMessage,
+      retryable: statusCode === 503 
+    }), {
+      status: statusCode,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 }
 
-// Optional: Handle OPTIONS requests for CORS if you ever call this from a different origin
-// or use custom headers that trigger preflight requests. For same-origin, it's less critical.
+// Handle OPTIONS requests for CORS
 export async function OPTIONS() {
   return new NextResponse(null, {
-    status: 204, // No Content
+    status: 204,
     headers: {
-      'Access-Control-Allow-Origin': '*', // Be more specific in production if needed
+      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization', // Adjust as per client's request headers
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     },
   });
 }

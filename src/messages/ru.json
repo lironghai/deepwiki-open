@@ -15,7 +15,8 @@
     "fetchingStructure": "Получение структуры репозитория...",
     "determiningStructure": "Определение структуры wiki...",
     "clearingCache": "Очистка кеша сервера...",
-    "preparingDownload": "Пожалуйста, подождите, идет подготовка загрузки..."
+    "preparingDownload": "Пожалуйста, подождите, идет подготовка загрузки...",
+    "preparingRepo": "Подготовка репозитория (клонирование + встраивание)..."
   },
   "home": {
     "welcome": "Добро пожаловать в DeepWiki-Open",
@@ -89,6 +90,11 @@
     "includeMode": "Включить только пути",
     "excludeModeDescription": "Укажите пути, которые нужно исключить из обработки (поведение по умолчанию)",
     "includeModeDescription": "Укажите только те пути, которые нужно включить, игнорируя остальные",
+    "branch": "Ветка",
+    "branchPlaceholder": "Введите название ветки (по умолчанию: main/master)",
+    "branchHint": "Оставьте пустым для использования ветки по умолчанию",
+    "defaultBranch": "по умолчанию",
+    "branchesFound": "Найдено {count} веток",
     "authorizationCode": "Код авторизации",
     "authorizationRequired": "Для генерации Wiki требуется авторизация."
   },

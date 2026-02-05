@@ -5,12 +5,14 @@ import rehypeRaw from 'rehype-raw';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import Mermaid from './Mermaid';
+import ErrorBoundary from './ErrorBoundary';
 
 interface MarkdownProps {
   content: string;
+  generateFileUrl?: (filePath: string, lineNumber?: string) => string; // Optional: Function to generate file URLs
 }
 
-const Markdown: React.FC<MarkdownProps> = ({ content }) => {
+const Markdown: React.FC<MarkdownProps> = ({ content, generateFileUrl }) => {
   // Define markdown components
   const MarkdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
     p({ children, ...props }: { children?: React.ReactNode }) {
@@ -58,9 +60,31 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
       return <li className="mb-2 text-sm leading-relaxed dark:text-white" {...props}>{children}</li>;
     },
     a({ children, href, ...props }: { children?: React.ReactNode; href?: string }) {
+      // Process href for source file citations
+      // Format: [filename.ext:line]() or [filename.ext:start-end]() or [path/to/file.ext]()
+      let processedHref = href;
+
+      if (generateFileUrl && children && typeof children === 'string') {
+        // Check if this is a source citation format
+        const citationMatch = children.match(/^([^:]+):?(\d+(?:-\d+)?)?$/);
+        if (citationMatch && (!href || href === '')) {
+          const filePath = citationMatch[1];
+          const lineInfo = citationMatch[2];
+
+          // Generate the proper URL
+          if (lineInfo) {
+            // Extract line number (use first line if it's a range)
+            const lineNumber = lineInfo.split('-')[0];
+            processedHref = `${generateFileUrl(filePath)}#L${lineNumber}`;
+          } else {
+            processedHref = generateFileUrl(filePath);
+          }
+        }
+      }
+
       return (
         <a
-          href={href}
+          href={processedHref}
           className="text-purple-600 dark:text-purple-400 hover:underline font-medium"
           target="_blank"
           rel="noopener noreferrer"
@@ -125,13 +149,24 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
       // Handle Mermaid diagrams
       if (!inline && match && match[1] === 'mermaid') {
         return (
-          <div className="my-8 bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden shadow-sm">
-            <Mermaid
-              chart={codeContent}
-              className="w-full max-w-full"
-              zoomingEnabled={true}
-            />
-          </div>
+          <ErrorBoundary
+            fallback={
+              <div className="my-8 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-4">
+                <p className="text-red-700 dark:text-red-300 text-sm">
+                  图表渲染失败，可能包含不支持的语法。请检查图表内容。
+                </p>
+              </div>
+            }
+          >
+            <div className="my-8 bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden shadow-sm">
+              <Mermaid
+                chart={codeContent}
+                className="w-full max-w-full"
+                zoomingEnabled={false}
+                showCodeToggle={true}
+              />
+            </div>
+          </ErrorBoundary>
         );
       }
 

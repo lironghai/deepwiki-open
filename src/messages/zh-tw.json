@@ -15,7 +15,8 @@
     "fetchingStructure": "取得儲存庫結構...",
     "determiningStructure": "驗證 Wiki 結構...",
     "clearingCache": "清除伺服器快取...",
-    "preparingDownload": "請稍候，我們正在準備您的下載..."
+    "preparingDownload": "請稍候，我們正在準備您的下載...",
+    "preparingRepo": "正在準備倉庫（克隆 + 嵌入處理）..."
   },
   "home": {
     "welcome": "歡迎使用 DeepWiki",
@@ -79,7 +80,12 @@
     "changeModel": "修改模型",
     "defaultNote": "這些預設設定已經被套用。請在上方新增您的自訂排除項目。",
     "hideDefault": "隱藏預設設定",
-    "viewDefault": "檢視預設設定"
+    "viewDefault": "檢視預設設定",
+    "branch": "分支",
+    "branchPlaceholder": "輸入分支名稱（預設：main/master）",
+    "branchHint": "留空則使用預設分支",
+    "defaultBranch": "預設",
+    "branchesFound": "找到 {count} 個分支"
   },
   "footer": {
     "copyright": "DeepWiki - 為程式碼儲存庫提供 AI 驅動的文件"

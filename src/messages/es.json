@@ -15,7 +15,8 @@
     "fetchingStructure": "Obteniendo estructura del repositorio...",
     "determiningStructure": "Determinando estructura del wiki...",
     "clearingCache": "Limpiando caché del servidor...",
-    "preparingDownload": "Por favor espere mientras preparamos su descarga..."
+    "preparingDownload": "Por favor espere mientras preparamos su descarga...",
+    "preparingRepo": "Preparando repositorio (clonar + embedding)..."
   },
   "home": {
     "welcome": "Bienvenido a DeepWiki",
@@ -80,6 +81,11 @@
     "defaultNote": "Estos valores predeterminados ya están aplicados. Agregue sus exclusiones personalizadas arriba.",
     "hideDefault": "Ocultar Predeterminados",
     "viewDefault": "Ver Predeterminados",
+    "branch": "Rama",
+    "branchPlaceholder": "Ingrese el nombre de la rama (predeterminado: main/master)",
+    "branchHint": "Dejar vacío para usar la rama predeterminada",
+    "defaultBranch": "predeterminada",
+    "branchesFound": "Se encontraron {count} ramas",
     "authorizationCode": "Código de Autorización",
     "authorizationRequired": "Generar Wiki requiere código de autorización"
   },

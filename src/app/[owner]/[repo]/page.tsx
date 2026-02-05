@@ -6,14 +6,16 @@ import Markdown from '@/components/Markdown';
 import ModelSelectionModal from '@/components/ModelSelectionModal';
 import ThemeToggle from '@/components/theme-toggle';
 import WikiTreeView from '@/components/WikiTreeView';
+import WikiEditor from '@/components/WikiEditor';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
+import { getWebSocketUrl } from '@/utils/websocketClient';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes } from 'react-icons/fa';
+import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram, FaEdit } from 'react-icons/fa';
 // Define the WikiSection and WikiStructure types directly in this file
 // since the imported types don't have the sections and rootSections properties
 interface WikiSection {
@@ -192,6 +194,7 @@ export default function RepoWikiPage() {
   const isCustomModelParam = searchParams.get('is_custom_model') === 'true';
   const customModelParam = searchParams.get('custom_model') || '';
   const language = searchParams.get('language') || 'en';
+  const branchParam = searchParams.get('branch') || undefined;
   const repoHost = (() => {
     if (!repoUrl) return '';
     try {
@@ -219,8 +222,9 @@ export default function RepoWikiPage() {
     type: repoType,
     token: token || null,
     localPath: localPath || null,
-    repoUrl: repoUrl || null
-  }), [owner, repo, repoType, localPath, repoUrl, token]);
+    repoUrl: repoUrl || null,
+    branch: branchParam || null
+  }), [owner, repo, repoType, localPath, repoUrl, token, branchParam]);
 
   // State variables
   const [isLoading, setIsLoading] = useState(true);
@@ -232,6 +236,8 @@ export default function RepoWikiPage() {
   const [currentPageId, setCurrentPageId] = useState<string | undefined>();
   const [generatedPages, setGeneratedPages] = useState<Record<string, WikiPage>>({});
   const [pagesInProgress, setPagesInProgress] = useState(new Set<string>());
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [codemapSummary, setCodemapSummary] = useState<any>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [originalMarkdown, setOriginalMarkdown] = useState<Record<string, string>>({});
@@ -271,6 +277,11 @@ export default function RepoWikiPage() {
   // Create a flag to ensure the effect only runs once
   const effectRan = React.useRef(false);
 
+  // Edit mode state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingPageId, setEditingPageId] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
   // State for Ask modal
   const [isAskModalOpen, setIsAskModalOpen] = useState(false);
   const askComponentRef = useRef<{ clearConversation: () => void } | null>(null);
@@ -290,24 +301,30 @@ export default function RepoWikiPage() {
       return filePath;
     }
 
-    const repoUrl = effectiveRepoInfo.repoUrl;
+    let repoUrl = effectiveRepoInfo.repoUrl;
     if (!repoUrl) {
       return filePath;
     }
 
+    const branch = effectiveRepoInfo.branch || defaultBranch;
     try {
       const url = new URL(repoUrl);
       const hostname = url.hostname;
-      
+
       if (hostname === 'github.com' || hostname.includes('github')) {
         // GitHub URL format: https://github.com/owner/repo/blob/branch/path
-        return `${repoUrl}/blob/${defaultBranch}/${filePath}`;
-      } else if (hostname === 'gitlab.com' || hostname.includes('gitlab')) {
+        return `${repoUrl}/blob/${branch}/${filePath}`;
+      } else if (hostname === 'gitlab.com' || hostname.includes('gitlab') || hostname === 'git.ljdong.net' || hostname.includes('ljdong')) {
         // GitLab URL format: https://gitlab.com/owner/repo/-/blob/branch/path
-        return `${repoUrl}/-/blob/${defaultBranch}/${filePath}`;
+        // 如果有仓库URL，构造文件跳转链接
+          // 移除可能的.git后缀
+          if (repoUrl.endsWith('.git')) {
+            repoUrl = repoUrl.slice(0, -4);
+          }
+        return `${repoUrl}/-/blob/${branch}/${filePath}`;
       } else if (hostname === 'bitbucket.org' || hostname.includes('bitbucket')) {
         // Bitbucket URL format: https://bitbucket.org/owner/repo/src/branch/path
-        return `${repoUrl}/src/${defaultBranch}/${filePath}`;
+        return `${repoUrl}/src/${branch}/${filePath}`;
       }
     } catch (error) {
       console.warn('Error generating file URL:', error);
@@ -316,6 +333,53 @@ export default function RepoWikiPage() {
     // Fallback to just the file path
     return filePath;
   }, [effectiveRepoInfo, defaultBranch]);
+
+  // Helper function to fill empty source citation URLs
+  const fillSourceUrls = useCallback((content: string): string => {
+    // Match patterns like [filename.ext:lines]() or [filename.ext]() with empty parentheses
+    const sourcePattern = /\[([^\]]+?\.[\w]+(?::\d+(?:-\d+)?)?)\]\(\)/g;
+
+    return content.replace(sourcePattern, (match, fileRef) => {
+      // Extract file path (before colon if line numbers exist)
+      const colonIndex = fileRef.indexOf(':');
+      const filePath = colonIndex >= 0 ? fileRef.substring(0, colonIndex) : fileRef;
+      const lineInfo = colonIndex >= 0 ? fileRef.substring(colonIndex) : '';
+
+      // Generate the file URL
+      const fileUrl = generateFileUrl(filePath);
+
+      // Add line number anchor for GitHub/GitLab if line numbers are present
+      let fullUrl = fileUrl;
+      if (lineInfo && effectiveRepoInfo.type !== 'local') {
+        const lineMatch = lineInfo.match(/:(\d+)(?:-(\d+))?/);
+        if (lineMatch) {
+          const startLine = lineMatch[1];
+          const endLine = lineMatch[2] || startLine;
+
+          try {
+            const url = new URL(effectiveRepoInfo.repoUrl || '');
+            const hostname = url.hostname;
+
+            if (hostname === 'github.com' || hostname.includes('github')) {
+              // GitHub format: #L1-L10
+              fullUrl = `${fileUrl}#L${startLine}${endLine !== startLine ? `-L${endLine}` : ''}`;
+            } else if (hostname === 'gitlab.com' || hostname.includes('gitlab') || hostname === 'git.ljdong.net' || hostname.includes('ljdong')) {
+              // GitLab format: #L1-10
+              fullUrl = `${fileUrl}#L${startLine}${endLine !== startLine ? `-${endLine}` : ''}`;
+            } else if (hostname === 'bitbucket.org' || hostname.includes('bitbucket')) {
+              // Bitbucket format: #lines-1:10
+              fullUrl = `${fileUrl}#lines-${startLine}${endLine !== startLine ? `:${endLine}` : ''}`;
+            }
+          } catch (error) {
+            // If URL parsing fails, just use the file URL without line anchors
+            console.warn('Error adding line anchors:', error);
+          }
+        }
+      }
+
+      return `[${fileRef}](${fullUrl})`;
+    });
+  }, [generateFileUrl, effectiveRepoInfo]);
 
   // Memoize repo info to avoid triggering updates in callbacks
 
@@ -415,14 +479,71 @@ export default function RepoWikiPage() {
         // Get repository URL
         const repoUrl = getRepoUrl(effectiveRepoInfo);
 
-        // Create the prompt content - simplified to avoid message dialogs
+        // Filter codemap modules relevant to this page
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let relevantModules: any[] = [];
+        if (codemapSummary && codemapSummary.key_modules && page.filePaths) {
+          relevantModules = codemapSummary.key_modules.filter((m: any) =>
+            page.filePaths.some((f: string) => m.file === f || m.file.includes(f) || f.includes(m.file))
+          );
+        }
+
+        // Create the prompt content - ENHANCED for deeper analysis with Codemap
  const promptContent =
-`You are an expert technical writer and software architect.
-Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
+`You are an expert technical writer, software architect, and code analyst with deep expertise in software engineering principles.
+Your task is to generate a DEEPLY TECHNICAL and COMPREHENSIVE wiki page in Markdown format about a specific feature, system, or module within a given software project.
+
+CRITICAL DEPTH REQUIREMENTS:
+This wiki page MUST be highly detailed and technical, covering:
+- Implementation details at the code level
+- Design patterns and architectural decisions
+- Algorithm complexity and performance characteristics  
+- Data structures and their trade-offs
+- API contracts and interfaces
+- Error handling strategies
+- Testing approaches
+- Security considerations (where applicable)
+
+${relevantModules.length > 0 ? `
+## Code Structure Information (from Codemap Analysis):
+
+This page should document the following classes/modules:
+
+${relevantModules.slice(0, 10).map((m: any) => `
+### ${m.name} (${m.type})
+- **File**: \`${m.file}\`
+- **Language**: ${m.language}
+${m.methods && m.methods.length > 0 ? `- **Methods**: ${m.methods.join(', ')}` : ''}
+${m.extends ? `- **Extends**: ${m.extends}` : ''}
+${m.implements && m.implements.length > 0 ? `- **Implements**: ${m.implements.join(', ')}` : ''}
+${m.field_count ? `- **Fields**: ${m.field_count} fields` : ''}
+`).join('\n')}
+
+${codemapSummary.dependencies && codemapSummary.dependencies.length > 0 ? `
+**Related Dependencies:**
+${codemapSummary.dependencies
+  .filter((d: any) => relevantModules.some((m: any) => m.name === d.from || m.name === d.to))
+  .slice(0, 15)
+  .map((d: any) => `- ${d.from} ${d.type} ${d.to}`)
+  .join('\n')}
+` : ''}
+
+**IMPORTANT**: Please include:
+1. **Class Diagram** (Mermaid syntax) showing inheritance (extends) and implementation (implements) relationships
+2. **Complete API Documentation** for all methods listed above with:
+   - Method signatures
+   - Parameters (with types and descriptions)
+   - Return values
+   - Exceptions/errors
+   - Usage examples
+3. **Dependency Diagram** (Mermaid syntax) showing how these modules interact
+4. **Practical code examples** demonstrating usage
+
+` : ''}
 
 You will be given:
 1. The "[WIKI_PAGE_TOPIC]" for the page you need to create.
-2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 5 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
+2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 10 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
 
 CRITICAL STARTING INSTRUCTION:
 The very first thing on the page MUST be a \`<details>\` block listing ALL the \`[RELEVANT_SOURCE_FILES]\` you used to generate the content. There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include.
@@ -443,9 +564,16 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
 
 1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of "${page.title}" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format \`[Link Text](#page-anchor-or-id)\`.
 
-2.  **Detailed Sections:** Break down "${page.title}" into logical sections using H2 (\`##\`) and H3 (\`###\`) Markdown headings. For each section:
-    *   Explain the architecture, components, data flow, or logic relevant to the section's focus, as evidenced in the source files.
-    *   Identify key functions, classes, data structures, API endpoints, or configuration elements pertinent to that section.
+2.  **Detailed Sections:** Break down "${page.title}" into logical sections using H2 (\`##\`) and H3 (\`###\`) Markdown headings. For each section, provide DEEP TECHNICAL ANALYSIS:
+    *   **Architecture & Design**: Explain the architectural patterns used (MVC, Observer, Factory, Singleton, etc.), design decisions, and their rationale based on code structure
+    *   **Implementation Details**: Describe key algorithms, data structures (time/space complexity where applicable), and implementation techniques at code level
+    *   **Component Interactions**: Detail how different classes/modules interact, what interfaces they implement, what protocols they follow
+    *   **Data Flow**: Trace how data moves through the system, transformations applied, validation steps, state management
+    *   **API Design**: Document function signatures, parameters (with types and constraints), return values, side effects, exceptions thrown
+    *   **Error Handling**: Describe exception handling strategies, error propagation, recovery mechanisms, logging approaches
+    *   **Performance Considerations**: Identify performance-critical paths, caching strategies, optimization techniques, potential bottlenecks
+    *   **Configuration & Customization**: Explain configuration options, environment variables, feature flags, extensibility points
+    *   **Dependencies**: List external libraries used, why they were chosen, how they're integrated
 
 3.  **Mermaid Diagrams:**
     *   EXTENSIVELY use Mermaid diagrams (e.g., \`flowchart TD\`, \`sequenceDiagram\`, \`classDiagram\`, \`erDiagram\`, \`graph TD\`) to visually represent architectures, flows, relationships, and schemas found in the source files.
@@ -480,8 +608,29 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
            - critical CriticalText ... option ... end (for critical regions)
            - break BreakText ... end (for breaking flows/exceptions)
          - Add notes for clarification: "Note over A,B: Description", "Note right of A: Detail"
-         - Use autonumber directive to add sequence numbers to messages
-         - NEVER use flowchart-style labels like A--|label|-->B. Always use a colon for labels: A->>B: My Label
+         - Use autonumber directive to add sequence numbers to messages (standalone on its own line)
+         - **CRITICAL MERMAID SYNTAX RULES - MUST FOLLOW TO AVOID PARSING ERRORS**:
+           * **NEVER use commas followed by square brackets** after Mermaid keywords or in arrow labels
+           * **WRONG**: "autonumber, [service-name]" or "autonumber    , [text] description"
+           * **CORRECT**: "autonumber" (standalone keyword only)
+           * **WRONG**: "participant User, [description]" or "User->>Service: Message, [note]"
+           * **CORRECT**: "participant User" and "User->>Service: Message description" (no commas/brackets)
+           * **WRONG**: "activate Service, [text]" or "deactivate, [cleanup] Service"
+           * **CORRECT**: "activate Service" and "deactivate Service" (standalone keywords)
+           * Place any annotations or notes OUTSIDE the diagram as regular text or use proper Note syntax
+         - ALWAYS use a colon for arrow labels: A->>B: My Label
+         - NEVER use flowchart-style labels like A--|label|-->B
+         - **ADDITIONAL CRITICAL SYNTAX RULES FOR ALL MERMAID DIAGRAMS**:
+           * **NEVER use commas in arrow labels**: Use colons only, e.g., "A->>B: Label text" not "A->>B: Label, note"
+           * **NEVER add trailing commas or brackets after keywords**: Keywords like "autonumber", "activate", "deactivate", "loop", "alt", "opt", "par", "end" must be standalone
+           * **NEVER mix Markdown syntax with Mermaid syntax**: No markdown links, bold, italic, or code formatting inside diagram code
+           * **ALWAYS validate participant names**: Use simple alphanumeric names or underscores, avoid special characters
+           * **ALWAYS close structural blocks properly**: Every "loop", "alt", "opt", "par", "box" must have a matching "end"
+           * **ALWAYS use proper indentation**: Indent content inside structural blocks for readability (2 spaces recommended)
+           * **For flowchart diagrams**: Use "graph TD" or "flowchart TD" (top-down), node IDs must be simple (alphanumeric, no spaces), use proper arrow syntax: --> or ---
+           * **For class diagrams**: Use "classDiagram", define classes with "class ClassName", use proper relationship syntax: -->, <|--, <|.., *--, o--
+           * **For ER diagrams**: Use "erDiagram", define entities with "EntityName {", use proper relationship syntax: ||--||, ||--o{, o}--||
+           * **TEST YOUR DIAGRAM**: Before including, mentally validate that the syntax follows Mermaid specification exactly - no extra commas, brackets, or markdown syntax
 
 4.  **Tables:**
     *   Use Markdown tables to summarize information such as:
@@ -500,6 +649,7 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
     *   Use the exact format: \`Sources: [filename.ext:start_line-end_line]()\` for a range, or \`Sources: [filename.ext:line_number]()\` for a single line. Multiple files can be cited: \`Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()\` (if the whole file is relevant and line numbers are not applicable or too broad).
     *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.
     *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.
+    *   **CRITICAL**: NEVER include source citations (like \`Sources: [file.ext]()\`) INSIDE Mermaid diagram code blocks. Source citations should ONLY appear in regular Markdown text, NOT within \`\`\`mermaid code blocks. Including citations in Mermaid diagrams will cause parsing errors.
 
 7.  **Technical Accuracy:** All information must be derived SOLELY from the \`[RELEVANT_SOURCE_FILES]\`. Do not infer, invent, or use external knowledge about similar systems or common practices unless it's directly supported by the provided code. If information is not present in the provided files, do not include it or explicitly state its absence if crucial to the topic.
 
@@ -543,10 +693,9 @@ Remember:
         let content = '';
 
         try {
-          // Create WebSocket URL from the server base URL
-          const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-          const wsBaseUrl = serverBaseUrl.replace(/^http/, 'ws')? serverBaseUrl.replace(/^https/, 'wss'): serverBaseUrl.replace(/^http/, 'ws');
-          const wsUrl = `${wsBaseUrl}/ws/chat`;
+          // Create WebSocket URL dynamically
+          const wsUrl = getWebSocketUrl('/ws/chat');
+          console.log('Connecting to WebSocket for page:', page.title, wsUrl);
 
           // Create a new WebSocket connection
           const ws = new WebSocket(wsUrl);
@@ -644,6 +793,31 @@ Remember:
         // Clean up markdown delimiters
         content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
 
+        // Fill empty source citation URLs with proper repository file links
+        content = fillSourceUrls(content);
+
+        // Preprocess Mermaid diagrams automatically
+        // Extract and process Mermaid code blocks
+        const mermaidBlockRegex = /```mermaid\n([\s\S]*?)```/gi;
+        content = content.replace(mermaidBlockRegex, (match, mermaidCode) => {
+          // Basic Mermaid preprocessing (remove Markdown links, fix common errors)
+          let cleaned = mermaidCode
+            // Remove Sources: [filename]() format
+            .replace(/Sources?:\s*\[[^\]]+\]\([^\)]*\)/gi, '')
+            // Remove standalone Markdown links (keep link text)
+            .replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1')
+            // Fix autonumber syntax errors
+            .replace(/autonumber\s*,\s*\[([^\]]+)\]/g, 'autonumber')
+            // Remove trailing commas before closing brackets
+            .replace(/,\s*\]/g, ']')
+            .replace(/,\s*\}/g, '}')
+            // Clean up extra whitespace
+            .replace(/\n\s*\n\s*\n/g, '\n\n')
+            .trim();
+          
+          return `\`\`\`mermaid\n${cleaned}\n\`\`\``;
+        });
+
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
 
         // Store the FINAL generated content
@@ -678,7 +852,183 @@ Remember:
         setLoadingMessage(undefined); // Clear specific loading message
       }
     });
-  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl]);
+  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, language, activeContentRequests, generateFileUrl, fillSourceUrls, codemapSummary]);
+
+  // Helper function to check repository embedding status
+  const checkRepoStatus = useCallback(async (repoUrl: string, repoType: string, token: string): Promise<{
+    ready: boolean, 
+    status: 'ready' | 'processing' | 'not_found' | 'error',
+    message: string, 
+    filePaths?: string[]
+  }> => {
+    try {
+      const response = await fetch('/api/repo/status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          repo_type: repoType,
+          token: token || undefined
+        })
+      });
+
+      if (!response.ok) {
+        console.warn('Failed to check repository status:', response.status);
+        return { ready: false, status: 'error', message: 'Status check failed' };
+      }
+
+      const data = await response.json();
+      const serverStatus = data.status as 'ready' | 'processing' | 'not_found' | 'error';
+      
+      return {
+        // Only consider truly ready when status is 'ready' AND has file paths
+        ready: serverStatus === 'ready' && data.file_paths && data.file_paths.length > 0,
+        status: serverStatus,
+        message: data.message,
+        // Return server-side processed file paths if available
+        filePaths: data.file_paths || undefined
+      };
+    } catch (error) {
+      console.warn('Error checking repository status:', error);
+      return { ready: false, status: 'error', message: 'Status check error' };
+    }
+  }, []);
+
+  // Helper function to wait for repository to be ready with polling
+  // Uses longer intervals for 'processing' status (server is actively working)
+  const waitForRepoReady = useCallback(async (
+    repoUrl: string,
+    repoType: string,
+    token: string,
+    maxAttempts: number = 20,
+    processingIntervalMs: number = 30000,  // 30 seconds for 'processing' status
+    notFoundIntervalMs: number = 5000      // 5 seconds for 'not_found' status (waiting for first request)
+  ): Promise<{ready: boolean, filePaths?: string[]}> => {
+
+    return { ready: true };
+    // for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    //   const statusResult = await checkRepoStatus(repoUrl, repoType, token);
+    //
+    //   if (statusResult.ready && statusResult.filePaths && statusResult.filePaths.length > 0) {
+    //     console.log(`Repository ready after ${attempt} attempt(s): ${statusResult.message}`);
+    //     return { ready: true, filePaths: statusResult.filePaths };
+    //   }
+    //
+    //   // Determine wait interval based on status
+    //   let waitInterval: number;
+    //   let statusMessage: string;
+    //
+    //   if (statusResult.status === 'processing') {
+    //     // Server is actively processing, use longer interval
+    //     waitInterval = processingIntervalMs;
+    //     const waitSeconds = Math.round(waitInterval / 1000);
+    //     statusMessage = `Processing repository... (attempt ${attempt}/${maxAttempts}, next check in ${waitSeconds}s)`;
+    //   } else if (statusResult.status === 'not_found') {
+    //     // Repository not started yet, use shorter interval
+    //     waitInterval = notFoundIntervalMs;
+    //     statusMessage = `Waiting for repository processing to start... (attempt ${attempt}/${maxAttempts})`;
+    //   } else {
+    //     // Error or unknown status, use medium interval
+    //     waitInterval = 10000;
+    //     statusMessage = `Checking repository status... (attempt ${attempt}/${maxAttempts})`;
+    //   }
+    //
+    //   console.log(`Repository status: ${statusResult.status} (attempt ${attempt}/${maxAttempts}): ${statusResult.message}`);
+    //   setLoadingMessage(statusMessage);
+    //
+    //   // Wait before next attempt
+    //   await new Promise(resolve => setTimeout(resolve, waitInterval));
+    // }
+    //
+    // console.warn('Repository not ready after maximum attempts');
+    // return { ready: false };
+  }, [checkRepoStatus]);
+
+  // Prepare repository (async background processing) and wait for it to be ready
+  const prepareAndWaitForRepo = useCallback(async (repoUrl: string, repoType: string, token: string): Promise<{ready: boolean, filePaths?: string[]}> => {
+    const MAX_WAIT_ATTEMPTS = 12000; // Maximum 10 minutes (120 * 5s)
+    const POLL_INTERVAL_MS = 30000; // 5 seconds between polls
+
+    try {
+      // Step 1: Trigger background preparation
+      setLoadingMessage(messages.loading?.preparingRepo || 'Preparing repository (clone + embedding)...');
+      console.log('Triggering repository preparation...');
+
+      const prepareResponse = await fetch('/api/repo/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          repo_type: repoType,
+          token: token || undefined,
+          branch: branchParam || undefined,
+          excluded_dirs: modelExcludedDirs || undefined,
+          excluded_files: modelExcludedFiles || undefined,
+          included_dirs: modelIncludedDirs || undefined,
+          included_files: modelIncludedFiles || undefined
+        })
+      });
+
+      const prepareData = await prepareResponse.json();
+      console.log('Prepare response:', prepareData);
+
+      // If already ready, return immediately
+      if (prepareData.status === 'ready') {
+        console.log('Repository already prepared');
+        // Get the file paths from status endpoint
+        const statusResponse = await fetch('/api/repo/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_url: repoUrl, repo_type: repoType, token: token || undefined })
+        });
+        const statusData = await statusResponse.json();
+        return { ready: true, filePaths: statusData.file_paths };
+      }
+
+      // Step 2: Poll for completion
+      for (let attempt = 1; attempt <= MAX_WAIT_ATTEMPTS; attempt++) {
+        // Wait before polling
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+        setLoadingMessage(`${messages.loading?.preparingRepo || 'Preparing repository'}... (${attempt}/${MAX_WAIT_ATTEMPTS})`);
+
+        const statusResponse = await fetch('/api/repo/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_url: repoUrl, repo_type: repoType, token: token || undefined })
+        });
+
+        if (!statusResponse.ok) {
+          console.warn(`Status check failed: ${statusResponse.status}`);
+          continue;
+        }
+
+        const statusData = await statusResponse.json();
+        console.log(`Status check ${attempt}: ${statusData.status} - ${statusData.message}`);
+
+        if (statusData.status === 'ready') {
+          console.log(`Repository ready after ${attempt} poll(s)`);
+          return { ready: true, filePaths: statusData.file_paths };
+        }
+
+        if (statusData.status === 'error') {
+          console.error('Repository preparation failed:', statusData.message);
+          return { ready: false };
+        }
+
+        // Continue polling if still processing
+      }
+
+      console.warn('Repository preparation timed out after maximum attempts');
+      return { ready: false };
+
+    } catch (error) {
+      console.error('Error during repository preparation:', error);
+      return { ready: false };
+    }
+  }, [messages.loading, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles]);
 
   // Determine the wiki structure from repository data
   const determineWikiStructure = useCallback(async (fileTree: string, readme: string, owner: string, repo: string) => {
@@ -702,6 +1052,97 @@ Remember:
       // Get repository URL
       const repoUrl = getRepoUrl(effectiveRepoInfo);
 
+      // === NEW: Prepare repository in background and wait for it to be ready ===
+      setLoadingMessage(messages.loading?.preparingRepo || 'Preparing repository...');
+      console.log('Starting repository preparation (async)...');
+      
+      const prepResult = await prepareAndWaitForRepo(repoUrl, effectiveRepoInfo.type, currentToken);
+      
+      // Determine which file tree to use
+      let actualFileTree = fileTree;  // Default to frontend file tree
+      let serverFilePaths: string[] | undefined = undefined;
+      
+      if (prepResult.ready && prepResult.filePaths && prepResult.filePaths.length > 0) {
+        // Repository is ready, use server-side file list
+        actualFileTree = prepResult.filePaths.join('\n');
+        serverFilePaths = prepResult.filePaths;
+        console.log(`Repository prepared, using server-side file list (${prepResult.filePaths.length} files)`);
+      } else {
+        // Preparation failed or timed out, use frontend file tree
+        console.log('Repository preparation incomplete, using frontend file tree');
+      }
+      
+      // Log which file source is being used
+      if (serverFilePaths) {
+        console.log(`Wiki structure will be generated using ${serverFilePaths.length} files from server`);
+      } else {
+        console.log('Wiki structure will be generated using frontend file tree (server file list not available)');
+      }
+
+      // === NEW: Generate full Codemap and fetch Summary for enhanced wiki generation ===
+      let codemapSummary: any = null;
+      try {
+        console.log('Generating codemap (this will also generate summary)...');
+        
+        // 首先尝试生成完整的codemap（这会同时生成summary）
+        try {
+          const generateResponse = await fetch('/api/codemap/generate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              repo_url: repoUrl,
+              repo_type: effectiveRepoInfo.type,
+              token: currentToken || undefined,
+              options: {
+                include_tests: true,
+                max_depth: 10,
+              },
+            }),
+          });
+          
+          if (generateResponse.ok) {
+            console.log('Full codemap generated successfully');
+            // 生成完整codemap后，获取summary用于Wiki生成
+            const summaryResponse = await fetch(
+              `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+            );
+            if (summaryResponse.ok) {
+              codemapSummary = await summaryResponse.json();
+              console.log(`Codemap summary loaded: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+              setCodemapSummary(codemapSummary); // Save to state for use in page generation
+            }
+          } else {
+            // 如果生成失败，尝试只获取summary（可能已经存在）
+            console.warn('Failed to generate codemap, trying to fetch existing summary...');
+            const summaryResponse = await fetch(
+              `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+            );
+            if (summaryResponse.ok) {
+              codemapSummary = await summaryResponse.json();
+              console.log(`Codemap summary loaded from cache: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+              setCodemapSummary(codemapSummary);
+            }
+          }
+        } catch (generateError) {
+          // 如果生成失败，尝试只获取summary
+          console.warn('Error generating codemap, trying to fetch existing summary:', generateError);
+          const summaryResponse = await fetch(
+            `/api/codemap/${owner}/${repo}/summary?repo_type=${effectiveRepoInfo.type}${currentToken ? `&token=${currentToken}` : ''}`
+          );
+          if (summaryResponse.ok) {
+            codemapSummary = await summaryResponse.json();
+            console.log(`Codemap summary loaded: ${codemapSummary.total_classes} classes, ${codemapSummary.total_functions} functions`);
+            setCodemapSummary(codemapSummary);
+          } else {
+            console.warn('Codemap summary not available, proceeding without it');
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch codemap summary, proceeding without it:', error);
+      }
+
       // Prepare request body
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const requestBody: Record<string, any> = {
@@ -711,15 +1152,59 @@ Remember:
           role: 'user',
 content: `Analyze this GitHub repository ${owner}/${repo} and create a wiki structure for it.
 
-1. The complete file tree of the project:
+1. The complete file tree of the project (THESE ARE THE ONLY FILES THAT EXIST):
 <file_tree>
-${fileTree}
+${actualFileTree}
 </file_tree>
 
 2. The README file of the project:
 <readme>
 ${readme}
 </readme>
+
+${codemapSummary ? `
+3. Code Architecture Overview (from Codemap Analysis):
+
+**Project Statistics:**
+- Total Files: ${codemapSummary.total_files}
+- Total Classes/Interfaces: ${codemapSummary.total_classes}
+- Total Functions: ${codemapSummary.total_functions}
+- Total Lines: ${codemapSummary.total_lines}
+- Languages: ${codemapSummary.languages.join(', ')}
+
+${codemapSummary.architecture_layers && Object.keys(codemapSummary.architecture_layers).length > 0 ? `
+**Architecture Layers Detected:**
+${Object.entries(codemapSummary.architecture_layers).map(([layer, classes]: [string, any]) => 
+  `- **${layer}**: ${Array.isArray(classes) ? classes.slice(0, 8).join(', ') : ''}${Array.isArray(classes) && classes.length > 8 ? ` (and ${classes.length - 8} more)` : ''}`
+).join('\n')}
+` : ''}
+
+${codemapSummary.key_modules && codemapSummary.key_modules.length > 0 ? `
+**Key Modules to Document:**
+${codemapSummary.key_modules.slice(0, 20).map((m: any) => {
+  let desc = `- **${m.name}** (${m.type}) in \`${m.file}\``;
+  if (m.methods && m.methods.length > 0) {
+    desc += `\n  Methods: ${m.methods.slice(0, 5).join(', ')}${m.methods.length > 5 ? ', ...' : ''}`;
+  }
+  if (m.extends) {
+    desc += `\n  Extends: ${m.extends}`;
+  }
+  if (m.implements && m.implements.length > 0) {
+    desc += `\n  Implements: ${m.implements.join(', ')}`;
+  }
+  return desc;
+}).join('\n')}
+${codemapSummary.key_modules.length > 20 ? `\n(and ${codemapSummary.key_modules.length - 20} more modules)` : ''}
+` : ''}
+
+Based on this code structure analysis, please create wiki pages that:
+- Cover each architecture layer (controllers, services, models, etc.)
+- Document the key modules and their APIs in detail
+- Include class diagrams showing inheritance and implementation relationships
+- Explain the dependencies between modules
+- Provide comprehensive API documentation for important classes
+
+` : ''}
 
 I want to create a wiki for this repository. Determine the most logical structure for a wiki based on the repository's content.
 
@@ -825,11 +1310,21 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Ensure the XML is properly formatted and valid
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
-IMPORTANT:
-1. Create ${isComprehensiveView ? '8-12' : '4-6'} pages that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
-2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
-3. The relevant_files should be actual files from the repository that would be used to generate that page
-4. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
+CRITICAL RULES - MUST FOLLOW:
+1. Create ${isComprehensiveView ? '12-16' : '6-8'} pages that would make a ${isComprehensiveView ? 'DEEPLY TECHNICAL and comprehensive' : 'concise but technical'} wiki for this repository
+2. Each page should provide DEEP TECHNICAL COVERAGE including:
+   - Implementation details and algorithms
+   - Design patterns and architectural decisions
+   - Code-level analysis with examples
+   - Performance characteristics
+   - Error handling strategies
+   - Testing approaches
+3. Pages should cover: Core Architecture, Data Models, API Design, Key Algorithms, State Management, Error Handling, Testing Strategy, Configuration, Deployment, Security (if applicable)
+4. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths that are not explicitly listed in the file tree.
+5. Each page should reference AT LEAST 8-10 source files for comprehensive technical coverage
+4. If the repository has very few files (e.g., only README.md), create fewer pages accordingly. DO NOT create pages that reference non-existent files.
+5. Before adding any <file_path>, verify it exists in the <file_tree> above. Common files like .gitignore, package.json, tsconfig.json, etc. should ONLY be included if they are ACTUALLY in the file tree.
+6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
         }]
       };
 
@@ -840,10 +1335,9 @@ IMPORTANT:
       let responseText = '';
 
       try {
-        // Create WebSocket URL from the server base URL
-        const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-        const wsBaseUrl = serverBaseUrl.replace(/^http/, 'ws')? serverBaseUrl.replace(/^https/, 'wss'): serverBaseUrl.replace(/^http/, 'ws');
-        const wsUrl = `${wsBaseUrl}/ws/chat`;
+        // Create WebSocket URL dynamically
+        const wsUrl = getWebSocketUrl('/ws/chat');
+        console.log('Connecting to WebSocket for wiki structure:', wsUrl);
 
         // Create a new WebSocket connection
         const ws = new WebSocket(wsUrl);
@@ -1085,67 +1579,38 @@ IMPORTANT:
       setWikiStructure(wikiStructure);
       setCurrentPageId(pages.length > 0 ? pages[0].id : undefined);
 
-      // Start generating content for all pages with controlled concurrency
+      // Start generating content for all pages using serial generation (one by one)
       if (pages.length > 0) {
         // Mark all pages as in progress
         const initialInProgress = new Set(pages.map(p => p.id));
         setPagesInProgress(initialInProgress);
 
-        console.log(`Starting generation for ${pages.length} pages with controlled concurrency`);
+        console.log(`Starting serial generation for ${pages.length} pages`);
 
-        // Maximum concurrent requests
-        const MAX_CONCURRENT = 1;
-
-        // Create a queue of pages
+        // Use serial generation: call generatePageContent for each page sequentially
+        const MAX_CONCURRENT = 1; // Serial processing
         const queue = [...pages];
         let activeRequests = 0;
 
-        // Function to process next items in queue
         const processQueue = () => {
-          // Process as many items as we can up to our concurrency limit
           while (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
             const page = queue.shift();
             if (page) {
               activeRequests++;
-              console.log(`Starting page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
-
-              // Start generating content for this page
               generatePageContent(page, owner, repo)
                 .finally(() => {
-                  // When done (success or error), decrement active count and process more
                   activeRequests--;
-                  console.log(`Finished page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
-
-                  // Check if all work is done (queue empty and no active requests)
                   if (queue.length === 0 && activeRequests === 0) {
-                    console.log("All page generation tasks completed.");
                     setIsLoading(false);
                     setLoadingMessage(undefined);
-                  } else {
-                    // Only process more if there are items remaining and we're under capacity
-                    if (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
-                      processQueue();
-                    }
+                  } else if (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
+                    processQueue();
                   }
                 });
             }
           }
-
-          // Additional check: If the queue started empty or becomes empty and no requests were started/active
-          if (queue.length === 0 && activeRequests === 0 && pages.length > 0 && pagesInProgress.size === 0) {
-            // This handles the case where the queue might finish before the finally blocks fully update activeRequests
-            // or if the initial queue was processed very quickly
-            console.log("Queue empty and no active requests after loop, ensuring loading is false.");
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          } else if (pages.length === 0) {
-            // Handle case where there were no pages to begin with
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          }
         };
 
-        // Start processing the queue
         processQueue();
       } else {
         // Set loading to false if there were no pages found
@@ -1161,7 +1626,7 @@ IMPORTANT:
     } finally {
       setStructureRequestInProgress(false);
     }
-  }, [generatePageContent, currentToken, effectiveRepoInfo, pagesInProgress.size, structureRequestInProgress, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, messages.loading, isComprehensiveView]);
+  }, [generatePageContent, currentToken, effectiveRepoInfo, pagesInProgress.size, structureRequestInProgress, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, language, messages.loading, isComprehensiveView, prepareAndWaitForRepo]);
 
   // Fetch repository structure using GitHub or GitLab API
   const fetchRepositoryStructure = useCallback(async () => {
@@ -1317,12 +1782,19 @@ IMPORTANT:
         }
       }
       else if (effectiveRepoInfo.type === 'gitlab') {
-        // GitLab API approach
+        // GitLab API approach - 使用代理解决 CORS 问题
         const projectPath = extractUrlPath(effectiveRepoInfo.repoUrl ?? '')?.replace(/\.git$/, '') || `${owner}/${repo}`;
         const projectDomain = extractUrlDomain(effectiveRepoInfo.repoUrl ?? "https://gitlab.com");
         const encodedProjectPath = encodeURIComponent(projectPath);
 
-        const headers = createGitlabHeaders(currentToken);
+        // 构建代理 URL 的辅助函数
+        const buildProxyUrl = (targetUrl: string, token?: string) => {
+          const params = new URLSearchParams({ url: targetUrl });
+          if (token) {
+            params.append('token', token);
+          }
+          return `/api/gitlab/proxy?${params.toString()}`;
+        };
 
         /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
         const filesData: any[] = [];
@@ -1337,7 +1809,12 @@ IMPORTANT:
           } catch (err) {
             throw new Error(`Invalid project domain URL: ${projectDomain}`);
           }
-          const projectInfoRes = await fetch(projectInfoUrl, { headers });
+
+          // 通过代理调用 GitLab API
+          const proxyUrl = buildProxyUrl(projectInfoUrl, currentToken);
+
+          console.log(`GitLab fetch url: ${proxyUrl} projectInfoUrl: ${projectInfoUrl}`);
+          const projectInfoRes = await fetch(proxyUrl);
 
           if (!projectInfoRes.ok) {
             const errorData = await projectInfoRes.text();
@@ -1356,7 +1833,9 @@ IMPORTANT:
           
           while (morePages) {
             const apiUrl = `${projectInfoUrl}/repository/tree?recursive=true&per_page=100&page=${page}`;
-            const response = await fetch(apiUrl, { headers });
+            // 通过代理调用 GitLab API
+            const treeProxyUrl = buildProxyUrl(apiUrl, currentToken);
+            const response = await fetch(treeProxyUrl);
 
             if (!response.ok) {
                 const errorData = await response.text();
@@ -1381,10 +1860,12 @@ IMPORTANT:
           .map((item: { type: string; path: string }) => item.path)
           .join('\n');
 
-          // Step 4: Try to fetch README.md content
-          const readmeUrl = `${projectInfoUrl}/repository/files/README.md/raw`;
+          // Step 4: Try to fetch README.md content (需要 ref 参数指定分支)
+          const readmeUrl = `${projectInfoUrl}/repository/files/README.md/raw?ref=${encodeURIComponent(defaultBranchLocal)}`;
             try {
-            const readmeResponse = await fetch(readmeUrl, { headers });
+            // 通过代理调用 GitLab API
+            const readmeProxyUrl = buildProxyUrl(readmeUrl, currentToken);
+            const readmeResponse = await fetch(readmeProxyUrl);
               if (readmeResponse.ok) {
                 readmeContent = await readmeResponse.text();
                 console.log('Successfully fetched GitLab README.md');
@@ -1931,8 +2412,84 @@ IMPORTANT:
   }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView]);
 
   const handlePageSelect = (pageId: string) => {
+    // Exit edit mode when switching pages
+    if (isEditing) {
+      setIsEditing(false);
+      setEditingPageId(null);
+    }
     if (currentPageId != pageId) {
       setCurrentPageId(pageId)
+    }
+  };
+
+  const handleEditPage = () => {
+    if (currentPageId) {
+      setEditingPageId(currentPageId);
+      setIsEditing(true);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditingPageId(null);
+  };
+
+  const handleSavePage = async (pageId: string, title: string, content: string) => {
+    setIsSaving(true);
+    try {
+      const response = await fetch('/api/wiki/page', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          owner: effectiveRepoInfo.owner,
+          repo: effectiveRepoInfo.repo,
+          repo_type: effectiveRepoInfo.type,
+          language: language,
+          page_id: pageId,
+          title: title,
+          content: content,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to save page');
+      }
+
+      // Update local state
+      setGeneratedPages((prev) => ({
+        ...prev,
+        [pageId]: {
+          ...prev[pageId],
+          title: title,
+          content: content,
+        },
+      }));
+
+      // Update wiki structure if needed
+      if (wikiStructure) {
+        setWikiStructure((prev) => {
+          if (!prev) return prev;
+          const updatedPages = prev.pages.map((p) =>
+            p.id === pageId ? { ...p, title: title } : p
+          );
+          return {
+            ...prev,
+            pages: updatedPages,
+          };
+        });
+      }
+
+      setIsEditing(false);
+      setEditingPageId(null);
+    } catch (error) {
+      console.error('Error saving page:', error);
+      alert(error instanceof Error ? error.message : '保存失败，请重试');
+      throw error;
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -1942,7 +2499,7 @@ IMPORTANT:
     <div className="h-screen paper-texture p-4 md:p-8 flex flex-col">
       <style>{wikiStyles}</style>
 
-      <header className="max-w-[90%] xl:max-w-[1400px] mx-auto mb-8 h-fit w-full">
+      <header className="w-full mx-auto mb-8 h-fit px-4 md:px-8">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-center gap-4">
             <Link href="/" className="text-[var(--accent-primary)] hover:text-[var(--highlight)] flex items-center gap-1.5 transition-colors border-b border-[var(--border-color)] hover:border-[var(--accent-primary)] pb-0.5">
@@ -1952,7 +2509,7 @@ IMPORTANT:
         </div>
       </header>
 
-      <main className="flex-1 max-w-[90%] xl:max-w-[1400px] mx-auto overflow-y-auto">
+      <main className="flex-1 w-full mx-auto overflow-y-auto px-4 md:px-8">
         {isLoading ? (
           <div className="flex flex-col items-center justify-center p-8 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
             <div className="relative mb-6">
@@ -2099,6 +2656,17 @@ IMPORTANT:
               </div>
 
               {/* Export buttons */}
+              {/* Codemap Link */}
+              <div className="mb-5">
+                <Link
+                  href={`/${owner}/${repo}/codemap?${searchParams.toString()}`}
+                  className="btn-japanese flex items-center text-xs px-3 py-2 rounded-md w-full"
+                >
+                  <FaProjectDiagram className="mr-2" />
+                  代码地图
+                </Link>
+              </div>
+
               {Object.keys(generatedPages).length > 0 && (
                 <div className="mb-5">
                   <h4 className="text-sm font-semibold text-[var(--foreground)] mb-3 font-serif">
@@ -2144,39 +2712,60 @@ IMPORTANT:
             {/* Wiki Content */}
             <div id="wiki-content" className="w-full flex-grow p-6 lg:p-8 overflow-y-auto">
               {currentPageId && generatedPages[currentPageId] ? (
-                <div className="max-w-[900px] xl:max-w-[1000px] mx-auto">
-                  <h3 className="text-xl font-bold text-[var(--foreground)] mb-4 break-words font-serif">
-                    {generatedPages[currentPageId].title}
-                  </h3>
-
-
-
-                  <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none">
-                    <Markdown
-                      content={generatedPages[currentPageId].content}
+                <div className="w-full mx-auto h-full flex flex-col">
+                  {isEditing && editingPageId === currentPageId ? (
+                    <WikiEditor
+                      pageId={currentPageId}
+                      initialTitle={generatedPages[currentPageId].title}
+                      initialContent={generatedPages[currentPageId].content}
+                      onSave={handleSavePage}
+                      onCancel={handleCancelEdit}
+                      isSaving={isSaving}
                     />
-                  </div>
-
-                  {generatedPages[currentPageId].relatedPages.length > 0 && (
-                    <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
-                      <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
-                        {messages.repoPage?.relatedPages || 'Related Pages:'}
-                      </h4>
-                      <div className="flex flex-wrap gap-2">
-                        {generatedPages[currentPageId].relatedPages.map(relatedId => {
-                          const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
-                          return relatedPage ? (
-                            <button
-                              key={relatedId}
-                              className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
-                              onClick={() => handlePageSelect(relatedId)}
-                            >
-                              {relatedPage.title}
-                            </button>
-                          ) : null;
-                        })}
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xl font-bold text-[var(--foreground)] break-words font-serif flex-1">
+                          {generatedPages[currentPageId].title}
+                        </h3>
+                        <button
+                          onClick={handleEditPage}
+                          className="ml-4 px-3 py-1.5 rounded-md bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-[var(--accent-primary)] transition-colors flex items-center gap-2 text-sm"
+                          title="编辑页面"
+                        >
+                          <FaEdit />
+                          编辑
+                        </button>
                       </div>
-                    </div>
+
+                      <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none flex-1">
+                        <Markdown
+                          content={generatedPages[currentPageId].content}
+                        />
+                      </div>
+
+                      {generatedPages[currentPageId].relatedPages.length > 0 && (
+                        <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
+                          <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
+                            {messages.repoPage?.relatedPages || 'Related Pages:'}
+                          </h4>
+                          <div className="flex flex-wrap gap-2">
+                            {generatedPages[currentPageId].relatedPages.map(relatedId => {
+                              const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
+                              return relatedPage ? (
+                                <button
+                                  key={relatedId}
+                                  className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
+                                  onClick={() => handlePageSelect(relatedId)}
+                                >
+                                  {relatedPage.title}
+                                </button>
+                              ) : null;
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               ) : (
@@ -2195,7 +2784,7 @@ IMPORTANT:
         ) : null}
       </main>
 
-      <footer className="max-w-[90%] xl:max-w-[1400px] mx-auto mt-8 flex flex-col gap-4 w-full">
+      <footer className="w-full mx-auto mt-8 flex flex-col gap-4 px-4 md:px-8">
         <div className="flex justify-between items-center gap-4 text-center text-[var(--muted)] text-sm h-fit w-full bg-[var(--card-bg)] rounded-lg p-3 shadow-sm border border-[var(--border-color)]">
           <p className="flex-1 font-serif">
             {messages.footer?.copyright || 'DeepWiki - Generate Wiki from GitHub/Gitlab/Bitbucket repositories'}

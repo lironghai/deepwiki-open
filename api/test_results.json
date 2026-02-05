@@ -1,0 +1,287 @@
+{
+  "java": {
+    "package": "com.example.demo",
+    "imports": [
+      "java.util.List",
+      "java.util.ArrayList",
+      "com.example.utils.Helper"
+    ],
+    "classes": [
+      {
+        "name": "DemoService",
+        "package": "com.example.demo",
+        "modifiers": [
+          "public"
+        ],
+        "extends": "BaseService implements ServiceInterface, Runnable",
+        "implements": [],
+        "start_line": 11,
+        "end_line": 40,
+        "is_interface": false,
+        "is_enum": false,
+        "is_annotation": false,
+        "methods": [
+          {
+            "name": "DemoService",
+            "modifiers": [],
+            "return_type": "public",
+            "parameters": [],
+            "start_line": 20,
+            "end_line": 23,
+            "is_constructor": false,
+            "throws": []
+          },
+          {
+            "name": "processData",
+            "modifiers": [
+              "public"
+            ],
+            "return_type": "String",
+            "parameters": [
+              {
+                "type": "String",
+                "name": "input"
+              },
+              {
+                "type": "int",
+                "name": "mode"
+              }
+            ],
+            "start_line": 28,
+            "end_line": 30,
+            "is_constructor": false,
+            "throws": [
+              "IOException"
+            ]
+          },
+          {
+            "name": "helperMethod",
+            "modifiers": [
+              "private"
+            ],
+            "return_type": "void",
+            "parameters": [],
+            "start_line": 32,
+            "end_line": 34,
+            "is_constructor": false,
+            "throws": []
+          },
+          {
+            "name": "run",
+            "modifiers": [
+              "public"
+            ],
+            "return_type": "void",
+            "parameters": [],
+            "start_line": 37,
+            "end_line": 39,
+            "is_constructor": false,
+            "throws": []
+          }
+        ],
+        "fields": [
+          {
+            "name": "CONSTANT",
+            "modifiers": [
+              "final"
+            ],
+            "type": "String",
+            "start_line": 13,
+            "default_value": "\"value\""
+          },
+          {
+            "name": "items",
+            "modifiers": [
+              "private"
+            ],
+            "type": "List<String>",
+            "start_line": 14,
+            "default_value": null
+          },
+          {
+            "name": "count",
+            "modifiers": [
+              "protected"
+            ],
+            "type": "int",
+            "start_line": 15,
+            "default_value": null
+          }
+        ]
+      },
+      {
+        "name": "ServiceInterface",
+        "package": "com.example.demo",
+        "modifiers": [],
+        "extends": null,
+        "implements": [],
+        "start_line": 42,
+        "end_line": 44,
+        "is_interface": true,
+        "is_enum": false,
+        "is_annotation": false,
+        "methods": [],
+        "fields": []
+      },
+      {
+        "name": "Status",
+        "package": "com.example.demo",
+        "modifiers": [],
+        "extends": null,
+        "implements": [],
+        "start_line": 46,
+        "end_line": 48,
+        "is_interface": false,
+        "is_enum": true,
+        "is_annotation": false,
+        "methods": [],
+        "fields": []
+      }
+    ]
+  },
+  "go": {
+    "package": "main",
+    "imports": [
+      "fmt",
+      "net/http",
+      "encoding/json"
+    ],
+    "structs": [
+      {
+        "name": "User",
+        "fields": [
+          {
+            "name": "ID",
+            "type": "int64",
+            "tag": "json:\"id\""
+          },
+          {
+            "name": "Name",
+            "type": "string",
+            "tag": "json:\"name\""
+          },
+          {
+            "name": "Email",
+            "type": "string",
+            "tag": "json:\"email\" validate:\"required\""
+          },
+          {
+            "name": "Password",
+            "type": "string",
+            "tag": "json:\"-\""
+          }
+        ],
+        "start_line": 11,
+        "end_line": 16,
+        "is_interface": false
+      },
+      {
+        "name": "UserService",
+        "fields": [
+          {
+            "name": "GetUser",
+            "type": "method",
+            "tag": null
+          },
+          {
+            "name": "CreateUser",
+            "type": "method",
+            "tag": null
+          },
+          {
+            "name": "UpdateUser",
+            "type": "method",
+            "tag": null
+          },
+          {
+            "name": "DeleteUser",
+            "type": "method",
+            "tag": null
+          }
+        ],
+        "start_line": 19,
+        "end_line": 24,
+        "is_interface": true
+      },
+      {
+        "name": "UserRepository",
+        "fields": [
+          {
+            "name": "db",
+            "type": "*sql.DB",
+            "tag": null
+          }
+        ],
+        "start_line": 27,
+        "end_line": 29,
+        "is_interface": false
+      }
+    ],
+    "functions": [
+      {
+        "name": "NewUserRepository",
+        "receiver": null,
+        "parameters": [
+          {
+            "name": "db",
+            "type": "*sql.DB"
+          }
+        ],
+        "returns": [],
+        "start_line": 32,
+        "end_line": 34
+      },
+      {
+        "name": "GetUser",
+        "receiver": {
+          "name": "r",
+          "type": "UserRepository"
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "type": "int64"
+          }
+        ],
+        "returns": [
+          "*User",
+          "error"
+        ],
+        "start_line": 37,
+        "end_line": 41
+      },
+      {
+        "name": "ValidateUser",
+        "receiver": null,
+        "parameters": [
+          {
+            "name": "user",
+            "type": "*User"
+          }
+        ],
+        "returns": [
+          "error"
+        ],
+        "start_line": 44,
+        "end_line": 49
+      },
+      {
+        "name": "HandleRequest",
+        "receiver": null,
+        "parameters": [
+          {
+            "name": "w",
+            "type": "http.ResponseWriter"
+          },
+          {
+            "name": "r",
+            "type": "*http.Request"
+          }
+        ],
+        "returns": [],
+        "start_line": 52,
+        "end_line": 54
+      }
+    ]
+  }
+}

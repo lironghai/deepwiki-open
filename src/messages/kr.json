@@ -15,7 +15,8 @@
       "fetchingStructure": "저장소 구조를 가져오는 중...",
       "determiningStructure": "위키 구조를 결정하는 중...",
       "clearingCache": "서버 캐시를 지우는 중...",
-      "preparingDownload": "다운로드를 준비 중입니다. 잠시만 기다려 주세요..."
+      "preparingDownload": "다운로드를 준비 중입니다. 잠시만 기다려 주세요...",
+      "preparingRepo": "리포지토리 준비 중 (클론 + 임베딩)..."
     },
     "home": {
       "welcome": "DeepWiki-Open에 오신 것을 환영합니다",
@@ -80,6 +81,11 @@
       "defaultNote": "이 기본 설정은 이미 적용되었습니다. 위에 사용자 지정 제외 항목을 추가하세요.",
       "hideDefault": "기본값 숨기기",
       "viewDefault": "기본값 보기",
+      "branch": "브랜치",
+      "branchPlaceholder": "브랜치 이름 입력 (기본값: main/master)",
+      "branchHint": "비워두면 기본 브랜치를 사용합니다",
+      "defaultBranch": "기본값",
+      "branchesFound": "{count}개의 브랜치를 찾았습니다",
       "authorizationCode": "인증코드",
       "authorizationRequired": "Wiki 생성에는 인증코드가 필요합니다"
     },
