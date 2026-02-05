@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://localhost:8001' ;
+const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://localhost:29004' ;
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -86,6 +86,10 @@ const nextConfig: NextConfig = {
       {
         source: '/api/codemap/:path*',
         destination: `${TARGET_SERVER_BASE_URL}/api/codemap/:path*`,
+      },
+      {
+        source: '/api/project',
+        destination: `${TARGET_SERVER_BASE_URL}/api/project`,
       },
     ];
   },

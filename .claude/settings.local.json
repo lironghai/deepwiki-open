@@ -10,7 +10,10 @@
       "Bash(start:*)",
       "Bash(curl:*)",
       "Bash(node test_mermaid_fix.js:*)",
-      "Bash(node test_source_urls.js:*)"
+      "Bash(node test_source_urls.js:*)",
+      "Bash(gh pr view:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

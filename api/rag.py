@@ -154,7 +154,7 @@ class RAG(adal.Component):
     """RAG with one repo.
     If you want to load a new repos, call prepare_retriever(repo_url_or_path) first."""
 
-    def __init__(self, provider="google", model=None, use_s3: bool = False):  # noqa: F841 - use_s3 is kept for compatibility
+    def __init__(self, provider="google", model=None, use_s3: bool = False, use_layered_retrieval: bool = True):  # noqa: F841 - use_s3 is kept for compatibility
         """
         Initialize the RAG component.
 
@@ -162,11 +162,15 @@ class RAG(adal.Component):
             provider: Model provider to use (google, openai, openrouter, ollama)
             model: Model name to use with the provider
             use_s3: Whether to use S3 for database storage (default: False)
+            use_layered_retrieval: Whether to use layered RAG retrieval (default: True)
         """
         super().__init__()
 
         self.provider = provider
         self.model = model
+        self.use_layered_retrieval = use_layered_retrieval
+        self.layered_rag = None
+        self.repo_path = None  # Will be set in prepare_retriever
 
         # Import the helper functions
         from api.config import get_embedder_config, get_embedder_type
@@ -206,6 +210,18 @@ class RAG(adal.Component):
         self.query_embedder = single_string_embedder if self.is_ollama_embedder else self.embedder
 
         self.initialize_db_manager()
+
+        # Initialize LayeredRAG if enabled
+        if self.use_layered_retrieval:
+            try:
+                from api.tools.rag_layers import LayeredRAG
+                from api.tools.codemap_cache import codemap_cache
+                # Will be initialized after prepare_retriever is called
+                self._codemap_cache = codemap_cache
+                logger.info("LayeredRAG support enabled (will be initialized after prepare_retriever)")
+            except ImportError as e:
+                logger.warning(f"Failed to import LayeredRAG: {e}. Falling back to standard RAG.")
+                self.use_layered_retrieval = False
 
         # Set up the output parser
         data_parser = adal.DataClassParser(data_class=RAGAnswer, return_data_class=True)
@@ -359,6 +375,30 @@ IMPORTANT FORMATTING RULES:
         """
         self.initialize_db_manager()
         self.repo_url_or_path = repo_url_or_path
+        
+        # Extract repo_path for LayeredRAG
+        try:
+            from adalflow.utils import get_adalflow_default_root_path
+            import os
+            from urllib.parse import urlparse
+            
+            if os.path.exists(repo_url_or_path):
+                # Local path
+                self.repo_path = repo_url_or_path
+            else:
+                # URL - extract owner and repo
+                parsed = urlparse(repo_url_or_path)
+                path_parts = [p for p in parsed.path.split('/') if p]
+                if len(path_parts) >= 2:
+                    owner = path_parts[-2]
+                    repo_name = path_parts[-1].replace(".git", "")
+                    self.repo_path = os.path.join(get_adalflow_default_root_path(), "repos", f"{owner}_{repo_name}")
+                else:
+                    self.repo_path = None
+        except Exception as e:
+            logger.debug(f"Could not determine repo_path: {e}")
+            self.repo_path = None
+        
         self.transformed_docs = self.db_manager.prepare_database(
             repo_url_or_path,
             type,
@@ -389,6 +429,16 @@ IMPORTANT FORMATTING RULES:
                 document_map_func=lambda doc: doc.vector,
             )
             logger.info("FAISS retriever created successfully")
+            
+            # Initialize LayeredRAG after retriever is ready
+            if self.use_layered_retrieval and self.repo_path and hasattr(self, '_codemap_cache'):
+                try:
+                    from api.tools.rag_layers import LayeredRAG
+                    self.layered_rag = LayeredRAG(self, self._codemap_cache)
+                    logger.info(f"LayeredRAG initialized for repo_path: {self.repo_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize LayeredRAG: {e}. Falling back to standard RAG.")
+                    self.use_layered_retrieval = False
         except Exception as e:
             logger.error(f"Error creating FAISS retriever: {str(e)}")
             # Try to provide more specific error information
@@ -419,18 +469,54 @@ IMPORTANT FORMATTING RULES:
 
         Args:
             query: The user's query
+            language: Language for the response (default: "en")
 
         Returns:
             Tuple of (RAGAnswer, retrieved_documents)
         """
         try:
-            retrieved_documents = self.retriever(query)
+            # Use LayeredRAG if available and repo_path is set
+            if self.use_layered_retrieval and self.layered_rag and self.repo_path:
+                try:
+                    logger.info(f"Using LayeredRAG for query: {query[:50]}...")
+                    layer_result = self.layered_rag.retrieve(query, self.repo_path, num_docs=10)
+                    
+                    # Convert LayeredRAG result to standard format
+                    # Create a mock retrieved_documents structure
+                    class MockRetrievedDocs:
+                        def __init__(self, documents, doc_indices):
+                            self.documents = documents
+                            self.doc_indices = doc_indices
+                    
+                    # Map documents to indices
+                    doc_indices = []
+                    for doc in layer_result.documents:
+                        try:
+                            idx = self.transformed_docs.index(doc)
+                            doc_indices.append(idx)
+                        except ValueError:
+                            # Document not in transformed_docs, skip
+                            continue
+                    
+                    retrieved_documents = [MockRetrievedDocs(layer_result.documents, doc_indices)]
+                    logger.info(f"LayeredRAG retrieved {len(layer_result.documents)} documents in {layer_result.execution_time_ms:.2f}ms")
+                    
+                except Exception as e:
+                    logger.warning(f"LayeredRAG failed: {e}. Falling back to standard RAG.")
+                    retrieved_documents = self.retriever(query)
+                    retrieved_documents[0].documents = [
+                        self.transformed_docs[doc_index]
+                        for doc_index in retrieved_documents[0].doc_indices
+                    ]
+            else:
+                # Standard RAG retrieval
+                retrieved_documents = self.retriever(query)
 
-            # Fill in the documents
-            retrieved_documents[0].documents = [
-                self.transformed_docs[doc_index]
-                for doc_index in retrieved_documents[0].doc_indices
-            ]
+                # Fill in the documents
+                retrieved_documents[0].documents = [
+                    self.transformed_docs[doc_index]
+                    for doc_index in retrieved_documents[0].doc_indices
+                ]
 
             return retrieved_documents
 

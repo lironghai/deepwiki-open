@@ -1,0 +1,324 @@
+{
+  "nodes": [
+    {
+      "id": "file_ai_enhanced_analyzer_py",
+      "name": "ai_enhanced_analyzer.py",
+      "type": "file",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": null,
+      "end_line": null,
+      "description": null,
+      "metadata": {
+        "size": 557,
+        "full_path": "D:\\project\\local\\deepwiki-open\\api\\ai_enhanced_analyzer.py",
+        "imports": [
+          "logging",
+          "json",
+          "typing",
+          "dataclasses",
+          "asyncio",
+          "api.code_analyzer",
+          "api.config",
+          "api.config",
+          "api.openai_client"
+        ]
+      }
+    },
+    {
+      "id": "class_file_ai_enhanced_analyzer_py_ExecutionPath",
+      "name": "ExecutionPath",
+      "type": "class",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 18,
+      "end_line": 23,
+      "description": "执行路径",
+      "metadata": {
+        "parent_file": "file_ai_enhanced_analyzer_py",
+        "bases": []
+      }
+    },
+    {
+      "id": "class_file_ai_enhanced_analyzer_py_ArchitectureInsight",
+      "name": "ArchitectureInsight",
+      "type": "class",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 27,
+      "end_line": 33,
+      "description": "架构洞察",
+      "metadata": {
+        "parent_file": "file_ai_enhanced_analyzer_py",
+        "bases": []
+      }
+    },
+    {
+      "id": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "name": "AIEnhancedCodeAnalyzer",
+      "type": "class",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 36,
+      "end_line": 543,
+      "description": "AI增强的代码分析器",
+      "metadata": {
+        "parent_file": "file_ai_enhanced_analyzer_py",
+        "bases": [
+          "CodeAnalyzer"
+        ]
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer___init__",
+      "name": "__init__",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 42,
+      "end_line": 76,
+      "description": null,
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_generate_ai_annotations",
+      "name": "generate_ai_annotations",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 78,
+      "end_line": 111,
+      "description": "为关键代码节点生成AI注解",
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__get_important_nodes",
+      "name": "_get_important_nodes",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 113,
+      "end_line": 150,
+      "description": "选择重要的节点进行AI注解",
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__generate_batch_annotations",
+      "name": "_generate_batch_annotations",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 152,
+      "end_line": 216,
+      "description": "批量生成注解",
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_identify_key_execution_paths",
+      "name": "identify_key_execution_paths",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 218,
+      "end_line": 268,
+      "description": "识别关键执行路径",
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    },
+    {
+      "id": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__find_entry_points",
+      "name": "_find_entry_points",
+      "type": "method",
+      "path": "ai_enhanced_analyzer.py",
+      "language": "python",
+      "start_line": 270,
+      "end_line": 293,
+      "description": "找到代码库的入口点",
+      "metadata": {
+        "parent_class": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_file_ai_enhanced_analyzer_py_contains_class_file_ai_enhanced_analyzer_py_ExecutionPath",
+      "source": "file_ai_enhanced_analyzer_py",
+      "target": "class_file_ai_enhanced_analyzer_py_ExecutionPath",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_ai_enhanced_analyzer_py_contains_class_file_ai_enhanced_analyzer_py_ArchitectureInsight",
+      "source": "file_ai_enhanced_analyzer_py",
+      "target": "class_file_ai_enhanced_analyzer_py_ArchitectureInsight",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_ai_enhanced_analyzer_py_contains_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "source": "file_ai_enhanced_analyzer_py",
+      "target": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer___init__",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer___init__",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_generate_ai_annotations",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_generate_ai_annotations",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__get_important_nodes",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__get_important_nodes",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__generate_batch_annotations",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__generate_batch_annotations",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_identify_key_execution_paths",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_identify_key_execution_paths",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__find_entry_points",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__find_entry_points",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__trace_execution_path",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__trace_execution_path",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__generate_path_description",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__generate_path_description",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__calculate_path_importance",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer__calculate_path_importance",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_generate_architecture_insights",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_generate_architecture_insights",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_contains_method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_analyze_with_ai",
+      "source": "class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer",
+      "target": "method_class_file_ai_enhanced_analyzer_py_AIEnhancedCodeAnalyzer_analyze_with_ai",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_ai_enhanced_analyzer_py_contains_func_file_ai_enhanced_analyzer_py_analyze_repository_with_ai",
+      "source": "file_ai_enhanced_analyzer_py",
+      "target": "func_file_ai_enhanced_analyzer_py_analyze_repository_with_ai",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_api_py_contains_func_file_api_py_get_adalflow_default_root_path",
+      "source": "file_api_py",
+      "target": "func_file_api_py_get_adalflow_default_root_path",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_api_py_contains_class_file_api_py_WikiPage",
+      "source": "file_api_py",
+      "target": "class_file_api_py_WikiPage",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_api_py_contains_class_file_api_py_ProcessedProjectEntry",
+      "source": "file_api_py",
+      "target": "class_file_api_py_ProcessedProjectEntry",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_api_py_contains_class_file_api_py_RepoInfo",
+      "source": "file_api_py",
+      "target": "class_file_api_py_RepoInfo",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    },
+    {
+      "id": "edge_file_api_py_contains_class_file_api_py_WikiSection",
+      "source": "file_api_py",
+      "target": "class_file_api_py_WikiSection",
+      "type": "contains",
+      "label": null,
+      "weight": 1
+    }
+  ],
+  "metadata": {
+    "repo_path": "D:\\project\\local\\deepwiki-open\\api",
+    "total_files": 34,
+    "total_lines": 16561,
+    "languages": {
+      "python": 32,
+      "markdown": 2
+    },
+    "node_count": 465,
+    "edge_count": 1604
+  }
+}

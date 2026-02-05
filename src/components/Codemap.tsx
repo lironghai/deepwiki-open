@@ -214,7 +214,7 @@ function CodemapContent({
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set(['directory']));
   const [selectedLanguages, setSelectedLanguages] = useState<Set<string>>(new Set());
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [layoutAlgorithm, setLayoutAlgorithm] = useState<LayoutAlgorithm>('grid');
+  const [layoutAlgorithm, setLayoutAlgorithm] = useState<LayoutAlgorithm>('fruchterman-reingold');
 
   // 获取所有唯一的节点类型
   const availableTypes = useMemo(() => {
@@ -262,27 +262,48 @@ function CodemapContent({
     let layoutOptions: Record<string, any>;
 
     switch (layoutAlgorithm) {
+      case 'fruchterman-reingold':
+        layoutOptions = {
+          width: 5000,
+          height: 4000,
+          iterations: 300,
+          k: Math.sqrt((5000 * 4000) / nodeCount), // Optimal k based on area
+          temperature: Math.max(5000, 4000) / 10,
+          coolingFactor: 0.95,
+          direction: 'TB', // Top to Bottom
+        };
+        break;
+      case 'hierarchical-orthogonal':
+        layoutOptions = {
+          levelHeight: 250,
+          nodeSpacing: 300,
+          direction: 'TB',
+          minimizeCrossings: true,
+          width: 5000,
+          height: 4000,
+        };
+        break;
       case 'force':
         layoutOptions = {
           width: 4000,
           height: 4000,
-          iterations: 200,  // Increased for better convergence
-          repulsionStrength: 8000,  // Stronger repulsion
-          attractionStrength: 0.02,  // Stronger attraction
+          iterations: 200,
+          repulsionStrength: 8000,
+          attractionStrength: 0.02,
           damping: 0.85,
         };
         break;
       case 'hierarchical':
         layoutOptions = {
-          levelHeight: 200,  // More vertical space
-          nodeSpacing: 250,  // More horizontal space
+          levelHeight: 200,
+          nodeSpacing: 250,
           direction: 'TB',
         };
         break;
       case 'grouped':
         layoutOptions = {
           groupBy: 'type',
-          groupSpacing: 400,  // More space between groups
+          groupSpacing: 400,
           nodeSpacing: 180,
           nodesPerRow: Math.max(4, Math.min(8, Math.ceil(nodeCount / 20))),
         };
@@ -291,8 +312,8 @@ function CodemapContent({
       default:
         layoutOptions = {
           columns,
-          xSpacing: 250,  // More horizontal space
-          ySpacing: 150,  // More vertical space
+          xSpacing: 250,
+          ySpacing: 150,
           groupByType: true,
         };
         break;
@@ -333,11 +354,15 @@ function CodemapContent({
   // 转换边数据
   const convertEdges = useCallback((codeEdges: CodeEdge[]) => {
     console.log(`Converting ${codeEdges.length} edges for ReactFlow`);
+    
+    // Use orthogonal routing for hierarchical-orthogonal layout
+    const edgeType = layoutAlgorithm === 'hierarchical-orthogonal' ? 'orthogonal' : 'smoothstep';
+    
     const converted = codeEdges.map(edge => ({
       id: edge.id,
       source: edge.source,
       target: edge.target,
-      type: 'smoothstep',
+      type: edgeType,
       label: edge.label || '',  // Handle null labels
       animated: edge.type === 'call',
       style: {
@@ -351,7 +376,7 @@ function CodemapContent({
     }));
     console.log(`First 3 converted edges:`, converted.slice(0, 3));
     return converted;
-  }, [MT]);
+  }, [MT, layoutAlgorithm]);
 
   // 初始化节点和边
   useEffect(() => {
@@ -511,10 +536,12 @@ function CodemapContent({
               onChange={e => setLayoutAlgorithm(e.target.value as LayoutAlgorithm)}
               className="w-full px-3 py-2 border border-[var(--border-color)] rounded-md bg-[var(--background)] text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-primary)]"
             >
-              <option value="grid">网格布局</option>
+              <option value="fruchterman-reingold">Fruchterman-Reingold (推荐)</option>
+              <option value="hierarchical-orthogonal">层次正交布局</option>
               <option value="force">力导向布局</option>
               <option value="hierarchical">层次布局</option>
               <option value="grouped">分组布局</option>
+              <option value="grid">网格布局</option>
             </select>
           </div>
 
@@ -600,9 +627,9 @@ function CodemapContent({
             minZoom={0.05}
             maxZoom={3}
             defaultViewport={{ x: 0, y: 0, zoom: 0.5 }}
-            connectionLineType="smoothstep"
+            connectionLineType={layoutAlgorithm === 'hierarchical-orthogonal' ? 'orthogonal' : 'smoothstep'}
             defaultEdgeOptions={{
-              type: 'smoothstep',
+              type: layoutAlgorithm === 'hierarchical-orthogonal' ? 'orthogonal' : 'smoothstep',
               animated: false,
               style: { strokeWidth: 2 }
             }}

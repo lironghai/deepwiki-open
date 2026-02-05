@@ -29,6 +29,9 @@ from api.rag import RAG
 # Configure logging
 from api.logging_config import setup_logging
 
+# Import MermaidPreprocessor for response preprocessing
+from api.tools.mermaid_preprocessor import MermaidPreprocessor
+
 setup_logging()
 logger = logging.getLogger(__name__)
 

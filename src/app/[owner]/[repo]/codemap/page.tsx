@@ -153,6 +153,7 @@ export default function CodemapPage() {
           include_tests: true,
           max_depth: 10,
         },
+        force_regenerate: true, // 强制重新生成
       };
 
       if (token) {

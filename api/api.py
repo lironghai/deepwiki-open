@@ -118,6 +118,18 @@ class WikiCacheRequest(BaseModel):
     provider: str
     model: str
 
+class WikiPageUpdateRequest(BaseModel):
+    """
+    Model for updating a single wiki page.
+    """
+    owner: str = Field(..., description="Repository owner")
+    repo: str = Field(..., description="Repository name")
+    repo_type: str = Field(..., description="Repository type (e.g., github, gitlab)")
+    language: str = Field(..., description="Language of the wiki content")
+    page_id: str = Field(..., description="ID of the page to update")
+    title: Optional[str] = Field(None, description="New title for the page (optional)")
+    content: Optional[str] = Field(None, description="New content for the page (optional)")
+
 class WikiExportRequest(BaseModel):
     """
     Model for requesting a wiki export.
@@ -410,6 +422,10 @@ app.add_api_route("/chat/completions/stream", chat_completions_stream, methods=[
 # Add the WebSocket endpoint
 app.add_websocket_route("/ws/chat", handle_websocket_chat)
 
+# Add parallel wiki generation WebSocket endpoint
+from api.websocket_wiki_parallel import handle_websocket_wiki_generate
+app.add_websocket_route("/ws/wiki/generate", handle_websocket_wiki_generate)
+
 # Import and add MCP routes
 from api.mcp_server import get_mcp_app
 app.include_router(get_mcp_app())
@@ -418,10 +434,45 @@ app.include_router(get_mcp_app())
 from api.codemap_endpoints import router as codemap_router
 app.include_router(codemap_router)
 
+# Add Mermaid preprocessing endpoint
+from api.tools.mermaid_preprocessor import MermaidPreprocessor
+
+class MermaidPreprocessRequest(BaseModel):
+    content: str = Field(..., description="Markdown content containing Mermaid diagrams")
+
+class MermaidPreprocessResponse(BaseModel):
+    processed_content: str = Field(..., description="Processed content with cleaned Mermaid diagrams")
+
+@app.post("/api/mermaid/preprocess", response_model=MermaidPreprocessResponse)
+async def preprocess_mermaid(request: MermaidPreprocessRequest):
+    """
+    Preprocess Mermaid diagrams in Markdown content to fix common syntax errors.
+    
+    This endpoint processes Mermaid code blocks to remove Markdown links,
+    fix syntax errors, and ensure diagrams render correctly.
+    """
+    try:
+        processed = MermaidPreprocessor.extract_and_process_mermaid_blocks(request.content)
+        return MermaidPreprocessResponse(processed_content=processed)
+    except Exception as e:
+        logger.error(f"Error preprocessing Mermaid: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to preprocess Mermaid: {str(e)}")
+
 # --- Wiki Cache Helper Functions ---
 
 WIKI_CACHE_DIR = os.path.join(get_adalflow_default_root_path(), "wikicache")
 os.makedirs(WIKI_CACHE_DIR, exist_ok=True)
+
+# Lock for wiki cache operations to ensure consistency
+wiki_cache_locks: Dict[str, threading.Lock] = {}
+wiki_cache_locks_lock = threading.Lock()
+
+def get_wiki_cache_lock(cache_path: str) -> threading.Lock:
+    """Get or create a lock for a specific cache file."""
+    with wiki_cache_locks_lock:
+        if cache_path not in wiki_cache_locks:
+            wiki_cache_locks[cache_path] = threading.Lock()
+        return wiki_cache_locks[cache_path]
 
 def get_wiki_cache_path(owner: str, repo: str, repo_type: str, language: str) -> str:
     """Generates the file path for a given wiki cache."""
@@ -445,6 +496,10 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
     """Saves wiki cache data to the file system."""
     cache_path = get_wiki_cache_path(data.repo.owner, data.repo.repo, data.repo.type, data.language)
     logger.info(f"Attempting to save wiki cache. Path: {cache_path}")
+    
+    # Use lock to ensure atomic write
+    cache_lock = get_wiki_cache_lock(cache_path)
+    
     try:
         payload = WikiCacheData(
             wiki_structure=data.wiki_structure,
@@ -461,18 +516,117 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
         except Exception as ser_e:
             logger.warning(f"Could not serialize payload for size logging: {ser_e}")
 
-
-        logger.info(f"Writing cache file to: {cache_path}")
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(payload.model_dump(), f, indent=2)
-        logger.info(f"Wiki cache successfully saved to {cache_path}")
+        # Atomic write: write to temp file first, then rename
+        temp_path = cache_path + '.tmp'
+        with cache_lock:
+            logger.info(f"Writing cache file to: {cache_path}")
+            # Write to temporary file first
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(payload.model_dump(), f, indent=2)
+            # Atomic rename (works on both Unix and Windows)
+            if os.path.exists(cache_path):
+                os.replace(temp_path, cache_path)
+            else:
+                os.rename(temp_path, cache_path)
+            logger.info(f"Wiki cache successfully saved to {cache_path}")
         return True
     except IOError as e:
         logger.error(f"IOError saving wiki cache to {cache_path}: {e.strerror} (errno: {e.errno})", exc_info=True)
+        # Clean up temp file if it exists
+        temp_path = cache_path + '.tmp'
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
         return False
     except Exception as e:
         logger.error(f"Unexpected error saving wiki cache to {cache_path}: {e}", exc_info=True)
+        # Clean up temp file if it exists
+        temp_path = cache_path + '.tmp'
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
         return False
+
+async def update_wiki_page(request: WikiPageUpdateRequest) -> bool:
+    """
+    Atomically update a single wiki page in the cache.
+    Uses file locking to ensure cache consistency.
+    """
+    cache_path = get_wiki_cache_path(request.owner, request.repo, request.repo_type, request.language)
+    cache_lock = get_wiki_cache_lock(cache_path)
+    
+    # Validate that at least one field is being updated
+    if request.title is None and request.content is None:
+        raise ValueError("At least one of 'title' or 'content' must be provided")
+    
+    with cache_lock:
+        try:
+            # Read existing cache
+            if not os.path.exists(cache_path):
+                raise FileNotFoundError(f"Wiki cache not found: {cache_path}")
+            
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            
+            # Validate cache structure
+            if 'generated_pages' not in cache_data:
+                raise ValueError("Invalid cache structure: missing 'generated_pages'")
+            
+            generated_pages = cache_data['generated_pages']
+            
+            # Check if page exists
+            if request.page_id not in generated_pages:
+                raise ValueError(f"Page with ID '{request.page_id}' not found in cache")
+            
+            # Update page
+            page = generated_pages[request.page_id]
+            if request.title is not None:
+                page['title'] = request.title
+            if request.content is not None:
+                page['content'] = request.content
+            
+            # Also update in wiki_structure.pages if it exists
+            if 'wiki_structure' in cache_data and 'pages' in cache_data['wiki_structure']:
+                for page_item in cache_data['wiki_structure']['pages']:
+                    if page_item.get('id') == request.page_id:
+                        if request.title is not None:
+                            page_item['title'] = request.title
+                        break
+            
+            # Atomic write: write to temp file first, then rename
+            temp_path = cache_path + '.tmp'
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            
+            # Atomic rename
+            if os.path.exists(cache_path):
+                os.replace(temp_path, cache_path)
+            else:
+                os.rename(temp_path, cache_path)
+            
+            logger.info(f"Successfully updated page '{request.page_id}' in cache: {cache_path}")
+            return True
+            
+        except FileNotFoundError as e:
+            logger.error(f"Cache file not found: {e}")
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            logger.error(f"Validation error: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error updating wiki page: {e}", exc_info=True)
+            # Clean up temp file if it exists
+            temp_path = cache_path + '.tmp'
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Failed to update wiki page: {str(e)}")
 
 # --- Wiki Cache API Endpoints ---
 
@@ -519,6 +673,33 @@ async def store_wiki_cache(request_data: WikiCacheRequest):
     else:
         raise HTTPException(status_code=500, detail="Failed to save wiki cache")
 
+@app.patch("/api/wiki_cache/page")
+async def update_wiki_page_endpoint(request: WikiPageUpdateRequest):
+    """
+    Update a single wiki page in the cache.
+    
+    This endpoint allows updating the title and/or content of a specific wiki page.
+    The update is atomic and thread-safe, ensuring cache consistency.
+    """
+    # Language validation
+    supported_langs = configs["lang_config"]["supported_languages"]
+    if not supported_langs.__contains__(request.language):
+        request.language = configs["lang_config"]["default"]
+    
+    logger.info(f"Attempting to update wiki page '{request.page_id}' for {request.owner}/{request.repo} ({request.repo_type}), lang: {request.language}")
+    
+    try:
+        success = await update_wiki_page(request)
+        if success:
+            return {"message": f"Wiki page '{request.page_id}' updated successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update wiki page")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error updating wiki page: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update wiki page: {str(e)}")
+
 @app.delete("/api/wiki_cache")
 async def delete_wiki_cache(
     owner: str = Query(..., description="Repository owner"),
@@ -542,18 +723,22 @@ async def delete_wiki_cache(
 
     logger.info(f"Attempting to delete wiki cache for {owner}/{repo} ({repo_type}), lang: {language}")
     cache_path = get_wiki_cache_path(owner, repo, repo_type, language)
-
-    if os.path.exists(cache_path):
-        try:
-            os.remove(cache_path)
-            logger.info(f"Successfully deleted wiki cache: {cache_path}")
-            return {"message": f"Wiki cache for {owner}/{repo} ({language}) deleted successfully"}
-        except Exception as e:
-            logger.error(f"Error deleting wiki cache {cache_path}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete wiki cache: {str(e)}")
-    else:
-        logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
-        raise HTTPException(status_code=404, detail="Wiki cache not found")
+    
+    # Use lock to ensure atomic delete
+    cache_lock = get_wiki_cache_lock(cache_path)
+    
+    with cache_lock:
+        if os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+                logger.info(f"Successfully deleted wiki cache: {cache_path}")
+                return {"message": f"Wiki cache for {owner}/{repo} ({language}) deleted successfully"}
+            except Exception as e:
+                logger.error(f"Error deleting wiki cache {cache_path}: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to delete wiki cache: {str(e)}")
+        else:
+            logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
+            raise HTTPException(status_code=404, detail="Wiki cache not found")
 
 # --- Repository Status Check Endpoint ---
 class RepoStatusRequest(BaseModel):
@@ -1050,6 +1235,7 @@ class CodemapGenerateRequest(BaseModel):
     token: Optional[str] = Field(None, description="Access token for private repositories")
     branch: Optional[str] = Field(None, description="Branch name to clone (defaults to repository's default branch)")
     options: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Analysis options")
+    force_regenerate: bool = Field(False, description="Force regenerate codemap even if cache exists")
 
 class CodemapResponse(BaseModel):
     """Model for codemap response."""
@@ -1266,12 +1452,20 @@ async def generate_codemap(request: CodemapGenerateRequest):
             owner = "local"
             repo_name = os.path.basename(request.repo_url)
         
-        # Check cache first
+        # Check cache first (only if not forcing regenerate)
         cache_path = get_codemap_cache_path(owner, repo_name, request.repo_type)
-        if os.path.exists(cache_path):
+        if os.path.exists(cache_path) and not request.force_regenerate:
             logger.info(f"Loading codemap from cache: {cache_path}")
             codemap_data = load_codemap(cache_path)
             return CodemapResponse(**codemap_data)
+        
+        # If force_regenerate is True, delete existing cache
+        if request.force_regenerate and os.path.exists(cache_path):
+            logger.info(f"Force regenerate requested, deleting existing cache: {cache_path}")
+            try:
+                os.remove(cache_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete cache file: {e}")
         
         # Analyze repository
         logger.info(f"Analyzing repository at {repo_path}")
@@ -1352,6 +1546,150 @@ async def delete_codemap_cache(
     else:
         logger.warning(f"Codemap cache not found, cannot delete: {cache_path}")
         raise HTTPException(status_code=404, detail="Codemap cache not found")
+
+# --- Project Deletion Endpoint ---
+class ProjectDeleteRequest(BaseModel):
+    """Model for project deletion request."""
+    owner: str = Field(..., description="Repository owner")
+    repo: str = Field(..., description="Repository name")
+    repo_type: str = Field("github", description="Repository type (e.g., github, gitlab)")
+    authorization_code: Optional[str] = Field(None, description="Authorization code")
+
+class ProjectDeleteResponse(BaseModel):
+    """Model for project deletion response."""
+    message: str = Field(..., description="Deletion result message")
+    deleted_items: List[str] = Field(..., description="List of deleted items")
+
+@app.delete("/api/project", response_model=ProjectDeleteResponse)
+async def delete_project(request: ProjectDeleteRequest):
+    """
+    Delete all data related to a project:
+    - Wiki caches (all languages)
+    - Codemap cache
+    - Repos directory
+    - Databases file
+    
+    This endpoint provides a unified way to completely remove a project and all its associated data.
+    """
+    import shutil
+    
+    # Check authorization if enabled
+    if WIKI_AUTH_MODE:
+        logger.info("Checking authorization code")
+        if not request.authorization_code or WIKI_AUTH_CODE != request.authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+    
+    owner = request.owner
+    repo = request.repo
+    repo_type = request.repo_type
+    repo_name = f"{owner}_{repo}"
+    root_path = get_adalflow_default_root_path()
+    
+    logger.info(f"Attempting to delete project {owner}/{repo} ({repo_type})")
+    
+    deleted_items = []
+    errors = []
+    
+    try:
+        # 1. Delete all wiki caches (all languages)
+        wiki_cache_dir = os.path.join(root_path, "wikicache")
+        if os.path.exists(wiki_cache_dir):
+            wiki_pattern_prefix = f"deepwiki_cache_{repo_type}_{owner}_{repo}_"
+            try:
+                wiki_files = await asyncio.to_thread(os.listdir, wiki_cache_dir)
+                for filename in wiki_files:
+                    if filename.startswith(wiki_pattern_prefix) and filename.endswith(".json"):
+                        cache_path = os.path.join(wiki_cache_dir, filename)
+                        try:
+                            await asyncio.to_thread(os.remove, cache_path)
+                            deleted_items.append(f"wiki_cache:{filename}")
+                            logger.info(f"Deleted wiki cache: {filename}")
+                        except Exception as e:
+                            error_msg = f"Failed to delete wiki cache {filename}: {str(e)}"
+                            logger.error(error_msg)
+                            errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Error listing wiki cache directory: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+        
+        # 2. Delete codemap cache
+        codemap_path = get_codemap_cache_path(owner, repo, repo_type)
+        if os.path.exists(codemap_path):
+            try:
+                await asyncio.to_thread(os.remove, codemap_path)
+                deleted_items.append("codemap_cache")
+                logger.info(f"Deleted codemap cache: {codemap_path}")
+            except Exception as e:
+                error_msg = f"Failed to delete codemap cache: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+        
+        # 3. Delete repos directory
+        repo_dir = os.path.join(root_path, "repos", repo_name)
+        if os.path.exists(repo_dir):
+            try:
+                await asyncio.to_thread(shutil.rmtree, repo_dir)
+                deleted_items.append("repos_directory")
+                logger.info(f"Deleted repos directory: {repo_dir}")
+            except Exception as e:
+                error_msg = f"Failed to delete repos directory: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+        
+        # 4. Delete database file
+        db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
+        if os.path.exists(db_file):
+            try:
+                await asyncio.to_thread(os.remove, db_file)
+                deleted_items.append("database_file")
+                logger.info(f"Deleted database file: {db_file}")
+            except Exception as e:
+                error_msg = f"Failed to delete database file: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+        
+        # 5. Clear any preparation status
+        repo_url_patterns = [
+            f"https://github.com/{owner}/{repo}",
+            f"https://gitlab.com/{owner}/{repo}",
+            f"https://bitbucket.org/{owner}/{repo}",
+        ]
+        with preparing_repos_lock:
+            for repo_url in list(preparing_repos.keys()):
+                if any(pattern in repo_url for pattern in repo_url_patterns):
+                    del preparing_repos[repo_url]
+                    deleted_items.append(f"preparation_status:{repo_url}")
+                    logger.info(f"Cleared preparation status for: {repo_url}")
+        
+        # Check if anything was deleted
+        if not deleted_items:
+            logger.warning(f"No project data found to delete for {owner}/{repo} ({repo_type})")
+            raise HTTPException(
+                status_code=404,
+                detail=f"No project data found for {owner}/{repo} ({repo_type})"
+            )
+        
+        # If there were errors but some items were deleted, return partial success
+        if errors:
+            logger.warning(f"Project deletion completed with some errors: {errors}")
+            return ProjectDeleteResponse(
+                message=f"Project {owner}/{repo} partially deleted. Some items may not have been deleted.",
+                deleted_items=deleted_items
+            )
+        
+        logger.info(f"Successfully deleted project {owner}/{repo} ({repo_type}). Deleted items: {deleted_items}")
+        return ProjectDeleteResponse(
+            message=f"Project {owner}/{repo} deleted successfully",
+            deleted_items=deleted_items
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Error deleting project {owner}/{repo}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.get("/api/codemap/{owner}/{repo}/summary")

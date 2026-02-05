@@ -6,6 +6,7 @@ import Markdown from '@/components/Markdown';
 import ModelSelectionModal from '@/components/ModelSelectionModal';
 import ThemeToggle from '@/components/theme-toggle';
 import WikiTreeView from '@/components/WikiTreeView';
+import WikiEditor from '@/components/WikiEditor';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
@@ -14,7 +15,7 @@ import { getWebSocketUrl } from '@/utils/websocketClient';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram } from 'react-icons/fa';
+import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram, FaEdit } from 'react-icons/fa';
 // Define the WikiSection and WikiStructure types directly in this file
 // since the imported types don't have the sections and rootSections properties
 interface WikiSection {
@@ -275,6 +276,11 @@ export default function RepoWikiPage() {
 
   // Create a flag to ensure the effect only runs once
   const effectRan = React.useRef(false);
+
+  // Edit mode state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingPageId, setEditingPageId] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // State for Ask modal
   const [isAskModalOpen, setIsAskModalOpen] = useState(false);
@@ -789,6 +795,28 @@ Remember:
 
         // Fill empty source citation URLs with proper repository file links
         content = fillSourceUrls(content);
+
+        // Preprocess Mermaid diagrams automatically
+        // Extract and process Mermaid code blocks
+        const mermaidBlockRegex = /```mermaid\n([\s\S]*?)```/gi;
+        content = content.replace(mermaidBlockRegex, (match, mermaidCode) => {
+          // Basic Mermaid preprocessing (remove Markdown links, fix common errors)
+          let cleaned = mermaidCode
+            // Remove Sources: [filename]() format
+            .replace(/Sources?:\s*\[[^\]]+\]\([^\)]*\)/gi, '')
+            // Remove standalone Markdown links (keep link text)
+            .replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1')
+            // Fix autonumber syntax errors
+            .replace(/autonumber\s*,\s*\[([^\]]+)\]/g, 'autonumber')
+            // Remove trailing commas before closing brackets
+            .replace(/,\s*\]/g, ']')
+            .replace(/,\s*\}/g, '}')
+            // Clean up extra whitespace
+            .replace(/\n\s*\n\s*\n/g, '\n\n')
+            .trim();
+          
+          return `\`\`\`mermaid\n${cleaned}\n\`\`\``;
+        });
 
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
 
@@ -1551,67 +1579,38 @@ CRITICAL RULES - MUST FOLLOW:
       setWikiStructure(wikiStructure);
       setCurrentPageId(pages.length > 0 ? pages[0].id : undefined);
 
-      // Start generating content for all pages with controlled concurrency
+      // Start generating content for all pages using serial generation (one by one)
       if (pages.length > 0) {
         // Mark all pages as in progress
         const initialInProgress = new Set(pages.map(p => p.id));
         setPagesInProgress(initialInProgress);
 
-        console.log(`Starting generation for ${pages.length} pages with controlled concurrency`);
+        console.log(`Starting serial generation for ${pages.length} pages`);
 
-        // Maximum concurrent requests
-        const MAX_CONCURRENT = 1;
-
-        // Create a queue of pages
+        // Use serial generation: call generatePageContent for each page sequentially
+        const MAX_CONCURRENT = 1; // Serial processing
         const queue = [...pages];
         let activeRequests = 0;
 
-        // Function to process next items in queue
         const processQueue = () => {
-          // Process as many items as we can up to our concurrency limit
           while (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
             const page = queue.shift();
             if (page) {
               activeRequests++;
-              console.log(`Starting page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
-
-              // Start generating content for this page
               generatePageContent(page, owner, repo)
                 .finally(() => {
-                  // When done (success or error), decrement active count and process more
                   activeRequests--;
-                  console.log(`Finished page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
-
-                  // Check if all work is done (queue empty and no active requests)
                   if (queue.length === 0 && activeRequests === 0) {
-                    console.log("All page generation tasks completed.");
                     setIsLoading(false);
                     setLoadingMessage(undefined);
-                  } else {
-                    // Only process more if there are items remaining and we're under capacity
-                    if (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
-                      processQueue();
-                    }
+                  } else if (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
+                    processQueue();
                   }
                 });
             }
           }
-
-          // Additional check: If the queue started empty or becomes empty and no requests were started/active
-          if (queue.length === 0 && activeRequests === 0 && pages.length > 0 && pagesInProgress.size === 0) {
-            // This handles the case where the queue might finish before the finally blocks fully update activeRequests
-            // or if the initial queue was processed very quickly
-            console.log("Queue empty and no active requests after loop, ensuring loading is false.");
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          } else if (pages.length === 0) {
-            // Handle case where there were no pages to begin with
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          }
         };
 
-        // Start processing the queue
         processQueue();
       } else {
         // Set loading to false if there were no pages found
@@ -2413,8 +2412,84 @@ CRITICAL RULES - MUST FOLLOW:
   }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView]);
 
   const handlePageSelect = (pageId: string) => {
+    // Exit edit mode when switching pages
+    if (isEditing) {
+      setIsEditing(false);
+      setEditingPageId(null);
+    }
     if (currentPageId != pageId) {
       setCurrentPageId(pageId)
+    }
+  };
+
+  const handleEditPage = () => {
+    if (currentPageId) {
+      setEditingPageId(currentPageId);
+      setIsEditing(true);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditingPageId(null);
+  };
+
+  const handleSavePage = async (pageId: string, title: string, content: string) => {
+    setIsSaving(true);
+    try {
+      const response = await fetch('/api/wiki/page', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          owner: effectiveRepoInfo.owner,
+          repo: effectiveRepoInfo.repo,
+          repo_type: effectiveRepoInfo.type,
+          language: language,
+          page_id: pageId,
+          title: title,
+          content: content,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to save page');
+      }
+
+      // Update local state
+      setGeneratedPages((prev) => ({
+        ...prev,
+        [pageId]: {
+          ...prev[pageId],
+          title: title,
+          content: content,
+        },
+      }));
+
+      // Update wiki structure if needed
+      if (wikiStructure) {
+        setWikiStructure((prev) => {
+          if (!prev) return prev;
+          const updatedPages = prev.pages.map((p) =>
+            p.id === pageId ? { ...p, title: title } : p
+          );
+          return {
+            ...prev,
+            pages: updatedPages,
+          };
+        });
+      }
+
+      setIsEditing(false);
+      setEditingPageId(null);
+    } catch (error) {
+      console.error('Error saving page:', error);
+      alert(error instanceof Error ? error.message : '保存失败，请重试');
+      throw error;
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -2424,7 +2499,7 @@ CRITICAL RULES - MUST FOLLOW:
     <div className="h-screen paper-texture p-4 md:p-8 flex flex-col">
       <style>{wikiStyles}</style>
 
-      <header className="max-w-[90%] xl:max-w-[1400px] mx-auto mb-8 h-fit w-full">
+      <header className="w-full mx-auto mb-8 h-fit px-4 md:px-8">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-center gap-4">
             <Link href="/" className="text-[var(--accent-primary)] hover:text-[var(--highlight)] flex items-center gap-1.5 transition-colors border-b border-[var(--border-color)] hover:border-[var(--accent-primary)] pb-0.5">
@@ -2434,7 +2509,7 @@ CRITICAL RULES - MUST FOLLOW:
         </div>
       </header>
 
-      <main className="flex-1 max-w-[90%] xl:max-w-[1400px] mx-auto overflow-y-auto">
+      <main className="flex-1 w-full mx-auto overflow-y-auto px-4 md:px-8">
         {isLoading ? (
           <div className="flex flex-col items-center justify-center p-8 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
             <div className="relative mb-6">
@@ -2637,39 +2712,60 @@ CRITICAL RULES - MUST FOLLOW:
             {/* Wiki Content */}
             <div id="wiki-content" className="w-full flex-grow p-6 lg:p-8 overflow-y-auto">
               {currentPageId && generatedPages[currentPageId] ? (
-                <div className="max-w-[900px] xl:max-w-[1000px] mx-auto">
-                  <h3 className="text-xl font-bold text-[var(--foreground)] mb-4 break-words font-serif">
-                    {generatedPages[currentPageId].title}
-                  </h3>
-
-
-
-                  <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none">
-                    <Markdown
-                      content={generatedPages[currentPageId].content}
+                <div className="w-full mx-auto h-full flex flex-col">
+                  {isEditing && editingPageId === currentPageId ? (
+                    <WikiEditor
+                      pageId={currentPageId}
+                      initialTitle={generatedPages[currentPageId].title}
+                      initialContent={generatedPages[currentPageId].content}
+                      onSave={handleSavePage}
+                      onCancel={handleCancelEdit}
+                      isSaving={isSaving}
                     />
-                  </div>
-
-                  {generatedPages[currentPageId].relatedPages.length > 0 && (
-                    <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
-                      <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
-                        {messages.repoPage?.relatedPages || 'Related Pages:'}
-                      </h4>
-                      <div className="flex flex-wrap gap-2">
-                        {generatedPages[currentPageId].relatedPages.map(relatedId => {
-                          const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
-                          return relatedPage ? (
-                            <button
-                              key={relatedId}
-                              className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
-                              onClick={() => handlePageSelect(relatedId)}
-                            >
-                              {relatedPage.title}
-                            </button>
-                          ) : null;
-                        })}
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xl font-bold text-[var(--foreground)] break-words font-serif flex-1">
+                          {generatedPages[currentPageId].title}
+                        </h3>
+                        <button
+                          onClick={handleEditPage}
+                          className="ml-4 px-3 py-1.5 rounded-md bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-[var(--accent-primary)] transition-colors flex items-center gap-2 text-sm"
+                          title="编辑页面"
+                        >
+                          <FaEdit />
+                          编辑
+                        </button>
                       </div>
-                    </div>
+
+                      <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none flex-1">
+                        <Markdown
+                          content={generatedPages[currentPageId].content}
+                        />
+                      </div>
+
+                      {generatedPages[currentPageId].relatedPages.length > 0 && (
+                        <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
+                          <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
+                            {messages.repoPage?.relatedPages || 'Related Pages:'}
+                          </h4>
+                          <div className="flex flex-wrap gap-2">
+                            {generatedPages[currentPageId].relatedPages.map(relatedId => {
+                              const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
+                              return relatedPage ? (
+                                <button
+                                  key={relatedId}
+                                  className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
+                                  onClick={() => handlePageSelect(relatedId)}
+                                >
+                                  {relatedPage.title}
+                                </button>
+                              ) : null;
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               ) : (
@@ -2688,7 +2784,7 @@ CRITICAL RULES - MUST FOLLOW:
         ) : null}
       </main>
 
-      <footer className="max-w-[90%] xl:max-w-[1400px] mx-auto mt-8 flex flex-col gap-4 w-full">
+      <footer className="w-full mx-auto mt-8 flex flex-col gap-4 px-4 md:px-8">
         <div className="flex justify-between items-center gap-4 text-center text-[var(--muted)] text-sm h-fit w-full bg-[var(--card-bg)] rounded-lg p-3 shadow-sm border border-[var(--border-color)]">
           <p className="flex-1 font-serif">
             {messages.footer?.copyright || 'DeepWiki - Generate Wiki from GitHub/Gitlab/Bitbucket repositories'}
