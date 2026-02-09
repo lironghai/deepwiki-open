@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useDeferredValue } from 'react';
 import Link from 'next/link';
 import { FaTimes, FaTh, FaList } from 'react-icons/fa';
 import type { ProcessedProject } from '@/types/processedProject';
@@ -28,6 +28,7 @@ export default function ProcessedProjects({
 }: ProcessedProjectsProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
 
   // Default messages fallback
   const defaultMessages = {
@@ -56,22 +57,26 @@ export default function ProcessedProjects({
     });
   }, []);
 
+  const indexedProjects = useMemo(() => {
+    return projects.map((project) => ({
+      project,
+      searchKey: `${project.name} ${project.owner} ${project.repo} ${project.repo_type}`.toLowerCase(),
+    }));
+  }, [projects]);
+
   // Filter projects based on search query
   const filteredProjects = useMemo(() => {
-    if (!searchQuery.trim()) {
+    const query = deferredSearchQuery.trim().toLowerCase();
+    if (!query) {
       return maxItems ? projects.slice(0, maxItems) : projects;
     }
 
-    const query = searchQuery.toLowerCase();
-    const filtered = projects.filter(project => 
-      project.name.toLowerCase().includes(query) ||
-      project.owner.toLowerCase().includes(query) ||
-      project.repo.toLowerCase().includes(query) ||
-      project.repo_type.toLowerCase().includes(query)
-    );
+    const filtered = indexedProjects
+      .filter(({ searchKey }) => searchKey.includes(query))
+      .map(({ project }) => project);
 
     return maxItems ? filtered.slice(0, maxItems) : filtered;
-  }, [projects, searchQuery, maxItems]);
+  }, [projects, indexedProjects, deferredSearchQuery, maxItems]);
 
   const preparedProjects = useMemo(() => {
     return filteredProjects.map((project) => {
