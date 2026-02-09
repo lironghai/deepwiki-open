@@ -24,6 +24,33 @@ logger = logging.getLogger(__name__)
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
 
+# Default request timeout (connect, read)
+REQUEST_TIMEOUT = (3.05, 30)
+
+# File extensions to look for, prioritizing code files
+CODE_EXTENSIONS = [
+    ".py",
+    ".js",
+    ".ts",
+    ".java",
+    ".cpp",
+    ".c",
+    ".h",
+    ".hpp",
+    ".go",
+    ".rs",
+    ".jsx",
+    ".tsx",
+    ".html",
+    ".css",
+    ".php",
+    ".swift",
+    ".cs",
+]
+DOC_EXTENSIONS = [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]
+CODE_EXTENSION_SET = set(CODE_EXTENSIONS)
+DOC_EXTENSION_SET = set(DOC_EXTENSIONS)
+
 _ENCODING_CACHE = {}
 
 def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool = None) -> int:
@@ -183,13 +210,6 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
     if embedder_type is None and is_ollama_embedder is not None:
         embedder_type = 'ollama' if is_ollama_embedder else None
     documents = []
-    # File extensions to look for, prioritizing code files
-    code_extensions = [".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".go", ".rs",
-                       ".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"]
-    doc_extensions = [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]
-    code_extension_set = set(code_extensions)
-    doc_extension_set = set(doc_extensions)
-
     # Determine filtering mode: inclusion or exclusion
     use_inclusion_mode = (included_dirs is not None and len(included_dirs) > 0) or (included_files is not None and len(included_files) > 0)
 
@@ -320,7 +340,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
         for file_name in filenames:
             ext = os.path.splitext(file_name)[1].lower()
-            if ext not in code_extension_set and ext not in doc_extension_set:
+            if ext not in CODE_EXTENSION_SET and ext not in DOC_EXTENSION_SET:
                 continue
 
             file_path = os.path.join(root, file_name)
@@ -332,7 +352,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
                     content = f.read()
                 relative_path = os.path.relpath(file_path, path)
 
-                if ext in code_extension_set:
+                if ext in CODE_EXTENSION_SET:
                     # Determine if this is an implementation file
                     is_implementation = (
                         not relative_path.startswith("test_")
@@ -502,7 +522,7 @@ def get_github_file_content(repo_url: str, file_path: str, access_token: str = N
             headers["Authorization"] = f"token {access_token}"
         logger.info(f"Fetching file content from GitHub API: {api_url}")
         try:
-            response = requests.get(api_url, headers=headers)
+            response = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
         except RequestException as e:
             raise ValueError(f"Error fetching file content: {e}")
@@ -573,7 +593,7 @@ def get_gitlab_file_content(repo_url: str, file_path: str, access_token: str = N
             if access_token:
                 project_headers["PRIVATE-TOKEN"] = access_token
             
-            project_response = requests.get(project_info_url, headers=project_headers)
+            project_response = requests.get(project_info_url, headers=project_headers, timeout=REQUEST_TIMEOUT)
             if project_response.status_code == 200:
                 project_data = project_response.json()
                 default_branch = project_data.get('default_branch', 'main')
@@ -592,7 +612,7 @@ def get_gitlab_file_content(repo_url: str, file_path: str, access_token: str = N
             headers["PRIVATE-TOKEN"] = access_token
         logger.info(f"Fetching file content from GitLab API: {api_url}")
         try:
-            response = requests.get(api_url, headers=headers)
+            response = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             content = response.text
         except RequestException as e:
@@ -644,7 +664,7 @@ def get_bitbucket_file_content(repo_url: str, file_path: str, access_token: str 
             if access_token:
                 repo_headers["Authorization"] = f"Bearer {access_token}"
             
-            repo_response = requests.get(repo_info_url, headers=repo_headers)
+            repo_response = requests.get(repo_info_url, headers=repo_headers, timeout=REQUEST_TIMEOUT)
             if repo_response.status_code == 200:
                 repo_data = repo_response.json()
                 default_branch = repo_data.get('mainbranch', {}).get('name', 'main')
@@ -666,7 +686,7 @@ def get_bitbucket_file_content(repo_url: str, file_path: str, access_token: str 
             headers["Authorization"] = f"Bearer {access_token}"
         logger.info(f"Fetching file content from Bitbucket API: {api_url}")
         try:
-            response = requests.get(api_url, headers=headers)
+            response = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
                 content = response.text
             elif response.status_code == 404:

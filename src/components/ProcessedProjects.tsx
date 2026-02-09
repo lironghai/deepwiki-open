@@ -1,36 +1,31 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import Link from 'next/link';
 import { FaTimes, FaTh, FaList } from 'react-icons/fa';
-
-// Interface should match the structure from the API
-interface ProcessedProject {
-  id: string;
-  owner: string;
-  repo: string;
-  name: string;
-  repo_type: string;
-  submittedAt: number;
-  language: string;
-}
+import type { ProcessedProject } from '@/types/processedProject';
 
 interface ProcessedProjectsProps {
   showHeader?: boolean;
   maxItems?: number;
   className?: string;
   messages?: Record<string, Record<string, string>>; // Translation messages with proper typing
+  projects: ProcessedProject[];
+  isLoading: boolean;
+  error: string | null;
+  setProjects: React.Dispatch<React.SetStateAction<ProcessedProject[]>>;
 }
 
 export default function ProcessedProjects({ 
   showHeader = true, 
   maxItems, 
   className = "",
-  messages 
+  messages,
+  projects,
+  isLoading,
+  error,
+  setProjects
 }: ProcessedProjectsProps) {
-  const [projects, setProjects] = useState<ProcessedProject[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
 
@@ -53,31 +48,12 @@ export default function ProcessedProjects({
     return defaultMessages[key as keyof typeof defaultMessages] || key;
   };
 
-  useEffect(() => {
-    const fetchProjects = async () => {
-      setIsLoading(true);
-      setError(null);
-      try {
-        const response = await fetch('/api/wiki/projects');
-        if (!response.ok) {
-          throw new Error(`Failed to fetch projects: ${response.statusText}`);
-        }
-        const data = await response.json();
-        if (data.error) {
-          throw new Error(data.error);
-        }
-        setProjects(data as ProcessedProject[]);
-      } catch (e: unknown) {
-        console.error("Failed to load projects from API:", e);
-        const message = e instanceof Error ? e.message : "An unknown error occurred.";
-        setError(message);
-        setProjects([]);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchProjects();
+  const dateFormatter = useMemo(() => {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    });
   }, []);
 
   // Filter projects based on search query
@@ -96,6 +72,16 @@ export default function ProcessedProjects({
 
     return maxItems ? filtered.slice(0, maxItems) : filtered;
   }, [projects, searchQuery, maxItems]);
+
+  const preparedProjects = useMemo(() => {
+    return filteredProjects.map((project) => {
+      return {
+        ...project,
+        href: `/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}`,
+        formattedDate: dateFormatter.format(new Date(project.submittedAt)),
+      };
+    });
+  }, [filteredProjects, dateFormatter]);
 
   const clearSearch = () => {
     setSearchQuery('');
@@ -191,9 +177,9 @@ export default function ProcessedProjects({
       {isLoading && <p className="text-[var(--muted)]">{t('loadingProjects')}</p>}
       {error && <p className="text-[var(--highlight)]">{t('errorLoading')} {error}</p>}
 
-      {!isLoading && !error && filteredProjects.length > 0 && (
+      {!isLoading && !error && preparedProjects.length > 0 && (
         <div className={viewMode === 'card' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4' : 'space-y-2'}>
-            {filteredProjects.map((project) => (
+            {preparedProjects.map((project) => (
             viewMode === 'card' ? (
               <div key={project.id} className="relative p-4 border border-[var(--border-color)] rounded-lg bg-[var(--card-bg)] shadow-sm hover:shadow-md transition-all duration-200 hover:scale-[1.02]">
                 <button
@@ -205,7 +191,7 @@ export default function ProcessedProjects({
                   <FaTimes className="h-4 w-4" />
                 </button>
                 <Link
-                  href={`/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}`}
+                  href={project.href}
                   className="block"
                 >
                   <h3 className="text-lg font-semibold text-[var(--link-color)] hover:underline mb-2 line-clamp-2">
@@ -220,7 +206,7 @@ export default function ProcessedProjects({
                     </span>
                   </div>
                   <p className="text-xs text-[var(--muted)]">
-                    {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()}
+                    {t('processedOn')} {project.formattedDate}
                   </p>
                 </Link>
               </div>
@@ -235,7 +221,7 @@ export default function ProcessedProjects({
                   <FaTimes className="h-4 w-4" />
                 </button>
                 <Link
-                  href={`/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}`}
+                  href={project.href}
                   className="flex items-center justify-between"
                 >
                   <div className="flex-1 min-w-0">
@@ -243,7 +229,7 @@ export default function ProcessedProjects({
                       {project.name}
                     </h3>
                     <p className="text-xs text-[var(--muted)] mt-1">
-                      {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()} • {project.repo_type} • {project.language}
+                      {t('processedOn')} {project.formattedDate} • {project.repo_type} • {project.language}
                     </p>
                   </div>
                   <div className="flex gap-2 ml-4">

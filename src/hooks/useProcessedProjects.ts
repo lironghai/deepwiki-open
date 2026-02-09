@@ -1,14 +1,6 @@
 import { useState, useEffect } from 'react';
 
-interface ProcessedProject {
-  id: string;
-  owner: string;
-  repo: string;
-  name: string;
-  repo_type: string;
-  submittedAt: number;
-  language: string;
-}
+import type { ProcessedProject } from '@/types/processedProject';
 
 export function useProcessedProjects() {
   const [projects, setProjects] = useState<ProcessedProject[]>([]);
@@ -16,11 +8,12 @@ export function useProcessedProjects() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     const fetchProjects = async () => {
       setIsLoading(true);
       setError(null);
       try {
-        const response = await fetch('/api/wiki/projects');
+        const response = await fetch('/api/wiki/projects', { signal: controller.signal });
         if (!response.ok) {
           throw new Error(`Failed to fetch projects: ${response.statusText}`);
         }
@@ -30,17 +23,25 @@ export function useProcessedProjects() {
         }
         setProjects(data as ProcessedProject[]);
       } catch (e: unknown) {
-        console.error("Failed to load projects from API:", e);
+        if (e instanceof DOMException && e.name === 'AbortError') {
+          return;
+        }
+        console.error('Failed to load projects from API:', e);
         const message = e instanceof Error ? e.message : "An unknown error occurred.";
         setError(message);
         setProjects([]);
       } finally {
-        setIsLoading(false);
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchProjects();
+    return () => {
+      controller.abort();
+    };
   }, []);
 
-  return { projects, isLoading, error };
+  return { projects, setProjects, isLoading, error };
 }

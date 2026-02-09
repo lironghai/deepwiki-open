@@ -45,7 +45,12 @@ const DEMO_SEQUENCE_CHART = `sequenceDiagram
 export default function Home() {
   const router = useRouter();
   const { language, setLanguage, messages, supportedLanguages } = useLanguage();
-  const { projects, isLoading: projectsLoading } = useProcessedProjects();
+  const {
+    projects,
+    setProjects,
+    isLoading: projectsLoading,
+    error: projectsError,
+  } = useProcessedProjects();
 
   // Create a simple translation function
   const t = (key: string, params: Record<string, string | number> = {}): string => {
@@ -508,6 +513,10 @@ export default function Home() {
                 maxItems={6}
                 messages={messages}
                 className="w-full"
+                projects={projects}
+                setProjects={setProjects}
+                isLoading={projectsLoading}
+                error={projectsError}
               />
             </div>
           ) : (
