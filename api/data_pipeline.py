@@ -7,7 +7,7 @@ import json
 import tiktoken
 import logging
 import base64
-import glob
+import fnmatch
 from adalflow.utils import get_adalflow_default_root_path
 from adalflow.core.db import LocalDB
 from api.config import configs, DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILES
@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
+
+_ENCODING_CACHE = {}
 
 def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool = None) -> int:
     """
@@ -49,18 +51,21 @@ def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool 
             embedder_type = get_embedder_type()
 
         # Choose encoding based on embedder type
-        if embedder_type == 'ollama':
-            # Ollama typically uses cl100k_base encoding
-            encoding = tiktoken.get_encoding("cl100k_base")
-        elif embedder_type == 'google':
-            # Google uses similar tokenization to GPT models for rough estimation
-            encoding = tiktoken.get_encoding("cl100k_base")
-        elif embedder_type == 'bedrock':
-            # Bedrock embedding models vary; use a common GPT-like encoding for rough estimation
-            encoding = tiktoken.get_encoding("cl100k_base")
-        else:  # OpenAI or default
-            # Use OpenAI embedding model encoding
-            encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+        encoding = _ENCODING_CACHE.get(embedder_type)
+        if encoding is None:
+            if embedder_type == 'ollama':
+                # Ollama typically uses cl100k_base encoding
+                encoding = tiktoken.get_encoding("cl100k_base")
+            elif embedder_type == 'google':
+                # Google uses similar tokenization to GPT models for rough estimation
+                encoding = tiktoken.get_encoding("cl100k_base")
+            elif embedder_type == 'bedrock':
+                # Bedrock embedding models vary; use a common GPT-like encoding for rough estimation
+                encoding = tiktoken.get_encoding("cl100k_base")
+            else:  # OpenAI or default
+                # Use OpenAI embedding model encoding
+                encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+            _ENCODING_CACHE[embedder_type] = encoding
 
         return len(encoding.encode(text))
     except Exception as e:
@@ -182,6 +187,8 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
     code_extensions = [".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".go", ".rs",
                        ".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"]
     doc_extensions = [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]
+    code_extension_set = set(code_extensions)
+    doc_extension_set = set(doc_extensions)
 
     # Determine filtering mode: inclusion or exclusion
     use_inclusion_mode = (included_dirs is not None and len(included_dirs) > 0) or (included_files is not None and len(included_files) > 0)
@@ -232,8 +239,20 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
     logger.info(f"Reading documents from {path}")
 
-    def should_process_file(file_path: str, use_inclusion: bool, included_dirs: List[str], included_files: List[str],
-                           excluded_dirs: List[str], excluded_files: List[str]) -> bool:
+    cleaned_included_dirs = {d.strip("./").rstrip("/") for d in included_dirs}
+    cleaned_excluded_dirs = {d.strip("./").rstrip("/") for d in excluded_dirs}
+    included_file_patterns = [p.strip() for p in included_files]
+    excluded_file_patterns = [p.strip() for p in excluded_files]
+
+    def _matches_patterns(file_name: str, patterns: List[str]) -> bool:
+        for pattern in patterns:
+            if not pattern:
+                continue
+            if fnmatch.fnmatch(file_name, pattern) or file_name == pattern or file_name.endswith(pattern):
+                return True
+        return False
+
+    def should_process_file(file_path: str, use_inclusion: bool) -> bool:
         """
         Determine if a file should be processed based on inclusion/exclusion rules.
 
@@ -256,27 +275,24 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
             is_included = False
 
             # Check if file is in an included directory
-            if included_dirs:
-                for included in included_dirs:
-                    clean_included = included.strip("./").rstrip("/")
-                    if clean_included in file_path_parts:
+            if cleaned_included_dirs:
+                for included in cleaned_included_dirs:
+                    if included in file_path_parts:
                         is_included = True
                         break
 
             # Check if file matches included file patterns
-            if not is_included and included_files:
-                for included_file in included_files:
-                    if file_name == included_file or file_name.endswith(included_file):
-                        is_included = True
-                        break
+            if not is_included and included_file_patterns:
+                if _matches_patterns(file_name, included_file_patterns):
+                    is_included = True
 
             # If no inclusion rules are specified for a category, allow all files from that category
-            if not included_dirs and not included_files:
+            if not cleaned_included_dirs and not included_file_patterns:
                 is_included = True
-            elif not included_dirs and included_files:
+            elif not cleaned_included_dirs and included_file_patterns:
                 # Only file patterns specified, allow all directories
                 pass  # is_included is already set based on file patterns
-            elif included_dirs and not included_files:
+            elif cleaned_included_dirs and not included_file_patterns:
                 # Only directory patterns specified, allow all files in included directories
                 pass  # is_included is already set based on directory patterns
 
@@ -286,34 +302,37 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
             is_excluded = False
 
             # Check if file is in an excluded directory
-            for excluded in excluded_dirs:
-                clean_excluded = excluded.strip("./").rstrip("/")
-                if clean_excluded in file_path_parts:
+            for excluded in cleaned_excluded_dirs:
+                if excluded in file_path_parts:
                     is_excluded = True
                     break
 
             # Check if file matches excluded file patterns
-            if not is_excluded:
-                for excluded_file in excluded_files:
-                    if file_name == excluded_file:
-                        is_excluded = True
-                        break
+            if not is_excluded and excluded_file_patterns:
+                if _matches_patterns(file_name, excluded_file_patterns):
+                    is_excluded = True
 
             return not is_excluded
 
-    # Process code files first
-    for ext in code_extensions:
-        files = glob.glob(f"{path}/**/*{ext}", recursive=True)
-        for file_path in files:
-            # Check if file should be processed based on inclusion/exclusion rules
-            if not should_process_file(file_path, use_inclusion_mode, included_dirs, included_files, excluded_dirs, excluded_files):
+    for root, dirnames, filenames in os.walk(path):
+        if not use_inclusion_mode and cleaned_excluded_dirs:
+            dirnames[:] = [d for d in dirnames if d not in cleaned_excluded_dirs]
+
+        for file_name in filenames:
+            ext = os.path.splitext(file_name)[1].lower()
+            if ext not in code_extension_set and ext not in doc_extension_set:
+                continue
+
+            file_path = os.path.join(root, file_name)
+            if not should_process_file(file_path, use_inclusion_mode):
                 continue
 
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    relative_path = os.path.relpath(file_path, path)
+                relative_path = os.path.relpath(file_path, path)
 
+                if ext in code_extension_set:
                     # Determine if this is an implementation file
                     is_implementation = (
                         not relative_path.startswith("test_")
@@ -339,22 +358,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
                         },
                     )
                     documents.append(doc)
-            except Exception as e:
-                logger.error(f"Error reading {file_path}: {e}")
-
-    # Then process documentation files
-    for ext in doc_extensions:
-        files = glob.glob(f"{path}/**/*{ext}", recursive=True)
-        for file_path in files:
-            # Check if file should be processed based on inclusion/exclusion rules
-            if not should_process_file(file_path, use_inclusion_mode, included_dirs, included_files, excluded_dirs, excluded_files):
-                continue
-
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    relative_path = os.path.relpath(file_path, path)
-
+                else:
                     # Check token count
                     token_count = count_tokens(content, embedder_type)
                     if token_count > MAX_EMBEDDING_TOKENS:
