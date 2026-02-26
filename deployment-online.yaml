@@ -1,0 +1,241 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deepwiki-secrets
+  namespace: business-test
+type: Opaque
+data:
+  # Base64编码的API密钥 (echo -n 'your-key' | base64)
+  google-api-key: c2stMDFkYmM5M2Y4NzAxNGUwNDk2ZDAxYTY4NGU2ZGIxNjY=
+  openai-api-key: c2stMDFkYmM5M2Y4NzAxNGUwNDk2ZDAxYTY4NGU2ZGIxNjY=
+  dashscope-api-key: c2stMDFkYmM5M2Y4NzAxNGUwNDk2ZDAxYTY4NGU2ZGIxNjY=
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepwiki-config
+  namespace: business-test
+data:
+  PORT: "8001"
+  NODE_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LOG_FILE_PATH: "api/logs/application.log"
+  OPENAI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  DASHSCOPE_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    meta.helm.sh/release-name: hero-deepwiki
+    meta.helm.sh/release-namespace: business-test
+  labels:
+    app: hero-deepwiki
+    app.kubernetes.io/managed-by: Helm
+    chart: hero-chart-1.0.3
+    heritage: Helm
+    release: hero-deepwiki
+  name: hero-deepwiki
+  namespace: business-test
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: hero-deepwiki
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2025-07-10T11:30:24+08:00'
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: '8080'
+        prometheus.io/scrape: 'true'
+      creationTimestamp: null
+      labels:
+        app: hero-deepwiki
+        pod-template-hash: 8975cdb85
+        release: hero-deepwiki
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: yingxiong.com/work
+                    operator: NotIn
+                    values:
+                      - nginx
+      containers:
+        - image: "registry.ljdong.net/business-test/server-feature/open-deepwiki:v0.0.2-snapshot"
+          imagePullPolicy: Always
+          name: "hero-deepwiki"
+          ports:
+            - containerPort: 3000
+              name: frontend
+              protocol: TCP
+            - containerPort: 8001
+              name: api
+              protocol: TCP
+          env:
+            # 从ConfigMap获取配置
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: PORT
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: NODE_ENV
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: LOG_LEVEL
+            - name: LOG_FILE_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: LOG_FILE_PATH
+            - name: OPENAI_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: OPENAI_BASE_URL
+            - name: DASHSCOPE_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: deepwiki-config
+                  key: DASHSCOPE_BASE_URL
+            # 从Secret获取敏感信息
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: deepwiki-secrets
+                  key: google-api-key
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: deepwiki-secrets
+                  key: openai-api-key
+            - name: DASHSCOPE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: deepwiki-secrets
+                  key: dashscope-api-key
+            # 动态设置SERVER_BASE_URL
+            - name: SERVER_BASE_URL
+              value: "http://localhost:$(PORT)"
+          volumeMounts:
+            - name: adalflow-data
+              mountPath: /root/.adalflow
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: '8'
+              memory: 16Gi
+            requests:
+              cpu: '2'
+              memory: 6Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+      volumes:
+        - name: adalflow-data
+          persistentVolumeClaim:
+            claimName: pvc-resources
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: harbor-secret
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: hero-deepwiki
+    meta.helm.sh/release-namespace: business-test
+  labels:
+    app: hero-deepwiki
+    app.kubernetes.io/managed-by: Helm
+    chart: hero-chart-1.0.3
+    heritage: Helm
+    release: hero-deepwiki
+    svcEndpoints: actuator
+  name: hero-deepwiki
+  namespace: business-test
+spec:
+  internalTrafficPolicy: Cluster
+  ports:
+    - name: frontend
+      port: 8888
+      protocol: TCP
+      targetPort: 3000
+    - name: api
+      port: 8001
+      protocol: TCP
+      targetPort: 8001
+  selector:
+    app: hero-deepwiki
+  sessionAffinity: None
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    meta.helm.sh/release-name: hero-deepwiki
+    meta.helm.sh/release-namespace: business-test
+    nginx.ingress.kubernetes.io/hsts: 'false'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '600'
+    nginx.ingress.kubernetes.io/ssl-redirect: 'false'
+  labels:
+    app: hero-deepwiki
+    app.kubernetes.io/managed-by: Helm
+    chart: hero-chart-1.0.3
+    heritage: Helm
+    release: hero-deepwiki
+  name: hero-deepwiki
+  namespace: business-test
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: deepwiki.huaweik3.yingxiong.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: hero-deepwiki
+                port:
+                  number: 8888
+            path: /
+            pathType: ImplementationSpecific

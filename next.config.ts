@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://localhost:29004' ;
+const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://deepwiki.huaweik3.yingxiong.com';
 
 const nextConfig: NextConfig = {
   /* config options here */

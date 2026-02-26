@@ -40,9 +40,8 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-# Helper function to get adalflow root path
-def get_adalflow_default_root_path():
-    return os.path.expanduser(os.path.join("~", ".adalflow"))
+# Import adalflow root path function to ensure consistent path across all modules
+from adalflow.utils import get_adalflow_default_root_path
 
 # --- Pydantic Models ---
 class WikiPage(BaseModel):
@@ -782,6 +781,24 @@ def _extract_repo_name(repo_url: str, repo_type: str) -> str:
     else:
         return url_parts[-1].replace(".git", "")
 
+
+def _embedding_vector_length(doc) -> int:
+    """Return embedding dimension for a document; 0 if missing or invalid. Same logic as data_pipeline/rag."""
+    vector = getattr(doc, "vector", None)
+    if vector is None:
+        return 0
+    try:
+        if hasattr(vector, "shape"):
+            if len(vector.shape) == 0:
+                return 0
+            return int(vector.shape[-1])
+        if hasattr(vector, "__len__"):
+            return int(len(vector))
+    except Exception:
+        return 0
+    return 0
+
+
 def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str],
                              excluded_dirs: Optional[str], excluded_files: Optional[str],
                              included_dirs: Optional[str], included_files: Optional[str],
@@ -903,7 +920,7 @@ async def prepare_repo(request: RepoPrepareRequest):
                 documents = db.get_transformed_data(key="split_and_embed")
                 
                 if documents and len(documents) > 0:
-                    valid_docs = [doc for doc in documents if hasattr(doc, 'vector') and doc.vector and len(doc.vector) > 0]
+                    valid_docs = [doc for doc in documents if _embedding_vector_length(doc) > 0]
                     if valid_docs:
                         logger.info(f"Repository {repo_name} already prepared with {len(valid_docs)} documents")
                         return RepoPrepareResponse(
@@ -1020,8 +1037,8 @@ async def check_repo_status(request: RepoStatusRequest):
                 documents = db.get_transformed_data(key="split_and_embed")
                 
                 if documents and len(documents) > 0:
-                    # Check if documents have valid embeddings
-                    valid_docs = [doc for doc in documents if hasattr(doc, 'vector') and doc.vector and len(doc.vector) > 0]
+                    # Check if documents have valid embeddings (same logic as data_pipeline/rag)
+                    valid_docs = [doc for doc in documents if _embedding_vector_length(doc) > 0]
                     if valid_docs:
                         # Extract unique file paths from the documents
                         unique_file_paths = list(set(
@@ -1044,6 +1061,14 @@ async def check_repo_status(request: RepoStatusRequest):
                             file_paths=unique_file_paths
                         )
                     else:
+                        # Debug: log why no valid embeddings (vector attribute / length)
+                        first = documents[0]
+                        vec = getattr(first, "vector", None)
+                        vec_len = _embedding_vector_length(first)
+                        logger.warning(
+                            "Repository %s: %s docs but no valid embeddings; first doc has_vector=%s, vector_type=%s, computed_len=%s",
+                            repo_name, len(documents), vec is not None, type(vec).__name__ if vec is not None else None, vec_len
+                        )
                         return RepoStatusResponse(
                             status="processing",
                             message="Repository data exists but embeddings are not complete",
