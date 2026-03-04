@@ -76,6 +76,39 @@ async def handle_websocket_chat(websocket: WebSocket):
         request_data = await websocket.receive_json()
         request = ChatCompletionRequest(**request_data)
 
+        # Detect wiki-structure generation requests early.
+        # These requests require XML output and should not be short-circuited
+        # by no-context fallback text responses.
+        last_user_content = ""
+        if request.messages and len(request.messages) > 0:
+            try:
+                candidate = request.messages[-1]
+                if hasattr(candidate, "content") and candidate.content:
+                    last_user_content = candidate.content
+            except Exception:
+                last_user_content = ""
+
+        wiki_structure_markers = [
+            "<wiki_structure>",
+            "create a wiki structure",
+            "determine the most logical structure for a wiki",
+            "return your analysis in the following xml format",
+            "return only the valid xml structure",
+            "生成 wiki 结构",
+            "生成wiki结构",
+            "返回 xml",
+            "返回xml",
+            "仅返回 xml",
+            "仅返回xml",
+            "no valid xml found in response",
+        ]
+        is_wiki_structure_request = any(
+            marker in (last_user_content or "").lower() for marker in wiki_structure_markers
+        )
+
+        # Whether retriever was successfully prepared.
+        retriever_ready = False
+
         # Check if request contains very large input
         input_too_large = False
         if request.messages and len(request.messages) > 0:
@@ -118,26 +151,39 @@ async def handle_websocket_chat(websocket: WebSocket):
             # )
             request_rag.prepare_retriever(request.repo_url, request.type, request.token, excluded_dirs, excluded_files, included_dirs, included_files)
             logger.info(f"Retriever prepared for {request.repo_url}")
+            retriever_ready = True
         except ValueError as e:
             if "No valid documents with embeddings found" in str(e):
                 logger.error(f"No valid embeddings found: {str(e)}")
-                await websocket.send_text("Error: No valid document embeddings found. This may be due to embedding size inconsistencies or API errors during document processing. Please try again or check your repository content.")
-                await websocket.close()
-                return
+                if is_wiki_structure_request:
+                    logger.warning("Wiki structure request detected. Continuing without retriever context.")
+                    retriever_ready = False
+                else:
+                    await websocket.send_text("Error: No valid document embeddings found. This may be due to embedding size inconsistencies or API errors during document processing. Please try again or check your repository content.")
+                    await websocket.close()
+                    return
             else:
                 logger.error(f"ValueError preparing retriever: {str(e)}")
-                await websocket.send_text(f"Error preparing retriever: {str(e)}")
-                await websocket.close()
-                return
+                if is_wiki_structure_request:
+                    logger.warning("Wiki structure request detected. Continuing despite retriever preparation error.")
+                    retriever_ready = False
+                else:
+                    await websocket.send_text(f"Error preparing retriever: {str(e)}")
+                    await websocket.close()
+                    return
         except Exception as e:
             logger.error(f"Error preparing retriever: {str(e)}")
             # Check for specific embedding-related errors
-            if "All embeddings should be of the same size" in str(e):
-                await websocket.send_text("Error: Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
+            if is_wiki_structure_request:
+                logger.warning("Wiki structure request detected. Continuing despite retriever exception.")
+                retriever_ready = False
             else:
-                await websocket.send_text(f"Error preparing retriever: {str(e)}")
-            await websocket.close()
-            return
+                if "All embeddings should be of the same size" in str(e):
+                    await websocket.send_text("Error: Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
+                else:
+                    await websocket.send_text(f"Error preparing retriever: {str(e)}")
+                await websocket.close()
+                return
 
         # Validate request
         if not request.messages or len(request.messages) == 0:
@@ -285,7 +331,7 @@ async def handle_websocket_chat(websocket: WebSocket):
         context_text = ""
         retrieved_documents = None
 
-        if not input_too_large:
+        if not input_too_large and retriever_ready:
             try:
                 # If filePath exists, modify the query for RAG to focus on the file
                 rag_query = query
@@ -333,6 +379,10 @@ async def handle_websocket_chat(websocket: WebSocket):
             except Exception as e:
                 logger.error(f"Error retrieving documents: {str(e)}")
                 context_text = ""
+        elif not retriever_ready:
+            logger.info("Skipping RAG retrieval because retriever is not ready")
+        else:
+            logger.info("Skipping RAG retrieval because input is too large")
 
         # Get repository information
         repo_url = request.repo_url
@@ -345,6 +395,22 @@ async def handle_websocket_chat(websocket: WebSocket):
         language_code = request.language or configs["lang_config"]["default"]
         supported_langs = configs["lang_config"]["supported_languages"]
         language_name = supported_langs.get(language_code, "English")
+
+        # Fetch file content if provided (need it early for no-context check)
+        file_content = ""
+        if request.filePath:
+            try:
+                file_content = get_file_content(request.repo_url, request.filePath, request.type, request.token)
+                logger.info(f"Successfully retrieved content for file: {request.filePath}")
+            except Exception as e:
+                logger.error(f"Error retrieving file content: {str(e)}")
+
+        # Track context availability for prompt strategy.
+        has_rag_context = bool(context_text.strip())
+        has_file_context = bool(file_content.strip())
+        has_codemap_context = bool(codemap_context.strip())
+        if not has_rag_context and not has_file_context and not has_codemap_context:
+            logger.info("No retrieval context available; continuing generation with strict prompt guards")
 
         # Create system prompt
         if is_deep_research:
@@ -490,16 +556,6 @@ This file contains...
 - Use markdown formatting to improve readability
 </style>"""
 
-        # Fetch file content if provided
-        file_content = ""
-        if request.filePath:
-            try:
-                file_content = get_file_content(request.repo_url, request.filePath, request.type, request.token)
-                logger.info(f"Successfully retrieved content for file: {request.filePath}")
-            except Exception as e:
-                logger.error(f"Error retrieving file content: {str(e)}")
-                # Continue without file content if there's an error
-
         # Format conversation history
         conversation_history = ""
         for turn_id, turn in request_rag.memory().items():
@@ -531,6 +587,19 @@ This file contains...
         if codemap_context.strip():
             prompt += f"<code_structure_context>\n{codemap_context}\n</code_structure_context>\n\n"
             logger.info("Injected codemap context into prompt")
+
+        # Hallucination guard for wiki-structure generation without retrieval context.
+        if is_wiki_structure_request and not has_rag_context and not has_file_context and not has_codemap_context:
+            prompt += (
+                "<no_retrieval_guard>\n"
+                "No retrieval context is available for this request.\n"
+                "You MUST still return valid <wiki_structure> XML.\n"
+                "Use ONLY information explicitly present in the user query payload (file tree/readme/metadata).\n"
+                "Do NOT invent file paths, modules, classes, or APIs.\n"
+                "If details are uncertain, keep page descriptions high-level and conservative.\n"
+                "Every <file_path> must be chosen only from the provided file tree.\n"
+                "</no_retrieval_guard>\n\n"
+            )
 
         prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 

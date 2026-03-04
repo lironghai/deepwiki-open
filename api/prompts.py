@@ -189,3 +189,4 @@ This file contains...
 - When showing code, include line numbers and file paths when relevant
 - Use markdown formatting to improve readability
 </style>"""
+

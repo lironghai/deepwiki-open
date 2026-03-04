@@ -1,4 +1,5 @@
 import logging
+import os
 import weakref
 import re
 from dataclasses import dataclass
@@ -47,6 +48,9 @@ logger = logging.getLogger(__name__)
 
 # Maximum token limit for embedding models
 MAX_INPUT_TOKENS = 7500  # Safe threshold below 8192 token limit
+
+# Minimum similarity score (prob [0,1]) to use a document; below this return no context to avoid hallucination
+MIN_RELEVANCE_SCORE = 0.3
 
 class Memory(adal.core.component.DataComponent):
     """Simple conversation management with a list of dialog turns."""
@@ -463,6 +467,69 @@ IMPORTANT FORMATTING RULES:
                 logger.error(f"Sample embedding sizes: {', '.join(sizes)}")
             raise
 
+    def _fill_and_filter_by_score(self, retrieved_documents: List) -> None:
+        """Fill .documents from indices and filter by relevance score to avoid hallucination."""
+        if not retrieved_documents or len(retrieved_documents) == 0:
+            return
+        out = retrieved_documents[0]
+        doc_indices = out.doc_indices
+        doc_scores = getattr(out, 'doc_scores', None)
+        out.documents = [
+            self.transformed_docs[idx]
+            for idx in doc_indices
+        ]
+        if doc_scores is not None and len(doc_scores) == len(out.documents):
+            kept = [
+                (idx, doc, s)
+                for idx, doc, s in zip(doc_indices, out.documents, doc_scores)
+                if s >= MIN_RELEVANCE_SCORE
+            ]
+            if not kept:
+                logger.info(
+                    f"All {len(doc_indices)} docs below relevance {MIN_RELEVANCE_SCORE}, returning none to avoid hallucination"
+                )
+            out.doc_indices = [t[0] for t in kept]
+            out.documents = [t[1] for t in kept]
+            out.doc_scores = [t[2] for t in kept]
+
+    def _grep_augment(self, query: str, retrieved_documents: List) -> List:
+        """Augment FAISS results with grep-based retrieval on the local clone."""
+        if not self.repo_path or not os.path.isdir(self.repo_path):
+            return retrieved_documents
+
+        try:
+            from api.tools.grep_retriever import GrepRetriever
+
+            grep = GrepRetriever(self.repo_path)
+            grep_docs = grep.retrieve_documents(
+                query, self.transformed_docs, max_docs=5
+            )
+            if not grep_docs:
+                return retrieved_documents
+
+            # Merge into existing result structure
+            if retrieved_documents and len(retrieved_documents) > 0:
+                out = retrieved_documents[0]
+                existing_ids = set(id(d) for d in getattr(out, 'documents', []))
+                added = 0
+                for doc in grep_docs:
+                    if id(doc) not in existing_ids:
+                        out.documents.append(doc)
+                        try:
+                            idx = self.transformed_docs.index(doc)
+                            out.doc_indices.append(idx)
+                        except ValueError:
+                            pass
+                        existing_ids.add(id(doc))
+                        added += 1
+                if added:
+                    logger.info(f"Grep augmented standard RAG with {added} additional docs")
+
+        except Exception as e:
+            logger.warning(f"Grep augmentation failed (non-fatal): {e}")
+
+        return retrieved_documents
+
     def call(self, query: str, language: str = "en") -> Tuple[List]:
         """
         Process a query using RAG.
@@ -482,7 +549,6 @@ IMPORTANT FORMATTING RULES:
                     layer_result = self.layered_rag.retrieve(query, self.repo_path, num_docs=10)
                     
                     # Convert LayeredRAG result to standard format
-                    # Create a mock retrieved_documents structure
                     class MockRetrievedDocs:
                         def __init__(self, documents, doc_indices):
                             self.documents = documents
@@ -495,7 +561,6 @@ IMPORTANT FORMATTING RULES:
                             idx = self.transformed_docs.index(doc)
                             doc_indices.append(idx)
                         except ValueError:
-                            # Document not in transformed_docs, skip
                             continue
                     
                     retrieved_documents = [MockRetrievedDocs(layer_result.documents, doc_indices)]
@@ -504,26 +569,19 @@ IMPORTANT FORMATTING RULES:
                 except Exception as e:
                     logger.warning(f"LayeredRAG failed: {e}. Falling back to standard RAG.")
                     retrieved_documents = self.retriever(query)
-                    retrieved_documents[0].documents = [
-                        self.transformed_docs[doc_index]
-                        for doc_index in retrieved_documents[0].doc_indices
-                    ]
+                    self._fill_and_filter_by_score(retrieved_documents)
+                    retrieved_documents = self._grep_augment(query, retrieved_documents)
             else:
-                # Standard RAG retrieval
+                # Standard RAG retrieval + grep augmentation
                 retrieved_documents = self.retriever(query)
-
-                # Fill in the documents
-                retrieved_documents[0].documents = [
-                    self.transformed_docs[doc_index]
-                    for doc_index in retrieved_documents[0].doc_indices
-                ]
+                self._fill_and_filter_by_score(retrieved_documents)
+                retrieved_documents = self._grep_augment(query, retrieved_documents)
 
             return retrieved_documents
 
         except Exception as e:
             logger.error(f"Error in RAG call: {str(e)}")
 
-            # Create error response
             error_response = RAGAnswer(
                 rationale="Error occurred while processing the query.",
                 answer=f"I apologize, but I encountered an error while processing your question. Please try again or rephrase your question."

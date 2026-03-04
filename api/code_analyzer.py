@@ -6,6 +6,7 @@ import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 from pathlib import Path
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -932,7 +933,9 @@ class CodeAnalyzer:
             'language_distribution': dict(self.language_stats),
             'key_modules': [],
             'architecture_layers': {},
-            'dependencies': []
+            'dependencies': [],
+            'architecture_modules': [],
+            'inter_module_relationships': []
         }
         
         # 统计类和函数
@@ -990,11 +993,224 @@ class CodeAnalyzer:
         
         # 提取重要依赖关系（限制为前100个）
         summary['dependencies'] = self._extract_key_dependencies(limit=100)
+
+        # 识别模块化架构（优先 Maven pom.xml 多模块）
+        module_architecture = self._identify_architecture_modules(class_nodes, function_nodes)
+        summary['architecture_modules'] = module_architecture.get('modules', [])
+        summary['inter_module_relationships'] = module_architecture.get('relationships', [])
+        summary['module_system'] = module_architecture.get('module_system')
+        summary['module_count'] = len(summary['architecture_modules'])
+        summary['has_multi_module_architecture'] = summary['module_count'] > 1
         
         logger.info(f"Generated codemap summary: {summary['total_classes']} classes, "
                    f"{summary['total_functions']} functions in {summary['total_files']} files")
         
         return summary
+
+    def _identify_architecture_modules(
+        self,
+        class_nodes: List[CodeNode],
+        function_nodes: List[CodeNode]
+    ) -> Dict[str, Any]:
+        """
+        识别仓库的架构模块信息。
+        优先从 Maven pom.xml 读取模块定义，并结合代码依赖构建模块关系。
+        """
+        root_pom = self.repo_path / "pom.xml"
+        if not root_pom.exists():
+            return {
+                "module_system": "none",
+                "modules": [],
+                "relationships": [],
+            }
+
+        root_meta = self._parse_pom_metadata(root_pom)
+        module_paths = root_meta.get("modules", [])
+        if not module_paths:
+            return {
+                "module_system": "maven-single",
+                "modules": [],
+                "relationships": [],
+            }
+
+        file_nodes = [n for n in self.nodes if n.type == NodeType.FILE]
+        class_count_by_path: Dict[str, int] = {}
+        function_count_by_path: Dict[str, int] = {}
+        for n in class_nodes:
+            class_count_by_path[n.path] = class_count_by_path.get(n.path, 0) + 1
+        for n in function_nodes:
+            function_count_by_path[n.path] = function_count_by_path.get(n.path, 0) + 1
+
+        modules: List[Dict[str, Any]] = []
+        artifact_to_module: Dict[str, str] = {}
+
+        for module_path in module_paths:
+            module_dir = self.repo_path / module_path
+            module_pom = module_dir / "pom.xml"
+            module_meta = self._parse_pom_metadata(module_pom)
+
+            module_name = module_meta.get("artifact_id") or module_path.replace("/", "-")
+            module_type = module_meta.get("packaging") or "jar"
+            artifact_id = module_meta.get("artifact_id")
+            if artifact_id:
+                artifact_to_module[artifact_id] = module_name
+
+            file_count = 0
+            class_count = 0
+            function_count = 0
+            language_distribution: Dict[str, int] = {}
+
+            module_prefix = module_path.replace("\\", "/").rstrip("/") + "/"
+            for file_node in file_nodes:
+                file_path = (file_node.path or "").replace("\\", "/")
+                if not file_path.startswith(module_prefix):
+                    continue
+                file_count += 1
+                if file_node.language:
+                    language_distribution[file_node.language] = language_distribution.get(file_node.language, 0) + 1
+                class_count += class_count_by_path.get(file_node.path, 0)
+                function_count += function_count_by_path.get(file_node.path, 0)
+
+            module_info = {
+                "id": f"module_{module_path.replace('/', '_')}",
+                "name": module_name,
+                "path": module_path,
+                "artifact_id": artifact_id,
+                "packaging": module_type,
+                "declared_dependencies": module_meta.get("dependencies", []),
+                "file_count": file_count,
+                "class_count": class_count,
+                "function_count": function_count,
+                "languages": sorted(list(language_distribution.keys())),
+                "language_distribution": language_distribution,
+            }
+            modules.append(module_info)
+
+        relationships = self._extract_inter_module_relationships(modules, artifact_to_module)
+        return {
+            "module_system": "maven-multi",
+            "modules": modules,
+            "relationships": relationships,
+        }
+
+    def _parse_pom_metadata(self, pom_path: Path) -> Dict[str, Any]:
+        """解析 pom.xml 元数据（兼容 namespace）。"""
+        if not pom_path.exists():
+            return {"artifact_id": None, "packaging": None, "modules": [], "dependencies": []}
+
+        try:
+            tree = ET.parse(pom_path)
+            root = tree.getroot()
+
+            def tag_endswith(elem, name: str) -> bool:
+                return isinstance(elem.tag, str) and elem.tag.endswith(name)
+
+            def first_child_text(parent, child_name: str) -> Optional[str]:
+                for child in list(parent):
+                    if tag_endswith(child, child_name):
+                        text = (child.text or "").strip()
+                        return text or None
+                return None
+
+            artifact_id = first_child_text(root, "artifactId")
+            packaging = first_child_text(root, "packaging") or "jar"
+
+            modules: List[str] = []
+            dependencies: List[str] = []
+
+            for child in list(root):
+                if tag_endswith(child, "modules"):
+                    for module_el in list(child):
+                        if tag_endswith(module_el, "module"):
+                            module_name = (module_el.text or "").strip()
+                            if module_name:
+                                modules.append(module_name)
+                elif tag_endswith(child, "dependencies"):
+                    for dep_el in list(child):
+                        if not tag_endswith(dep_el, "dependency"):
+                            continue
+                        dep_artifact = first_child_text(dep_el, "artifactId")
+                        if dep_artifact:
+                            dependencies.append(dep_artifact)
+
+            return {
+                "artifact_id": artifact_id,
+                "packaging": packaging,
+                "modules": modules,
+                "dependencies": dependencies,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to parse pom.xml {pom_path}: {e}")
+            return {"artifact_id": None, "packaging": None, "modules": [], "dependencies": []}
+
+    def _extract_inter_module_relationships(
+        self,
+        modules: List[Dict[str, Any]],
+        artifact_to_module: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        """提取跨模块关系：pom 依赖 + 代码层 import/call 关系。"""
+        if not modules:
+            return []
+
+        module_name_by_path = {m["path"].replace("\\", "/").rstrip("/"): m["name"] for m in modules}
+        module_paths = sorted(module_name_by_path.keys(), key=len, reverse=True)
+
+        def resolve_module_name(file_path: str) -> Optional[str]:
+            normalized = (file_path or "").replace("\\", "/")
+            for module_path in module_paths:
+                prefix = module_path + "/"
+                if normalized == module_path or normalized.startswith(prefix):
+                    return module_name_by_path[module_path]
+            return None
+
+        rel_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for module in modules:
+            source_name = module["name"]
+            for dep_artifact in module.get("declared_dependencies", []):
+                target_name = artifact_to_module.get(dep_artifact)
+                if not target_name or target_name == source_name:
+                    continue
+                key = (source_name, target_name)
+                if key not in rel_map:
+                    rel_map[key] = {
+                        "from_module": source_name,
+                        "to_module": target_name,
+                        "pom_dependency": False,
+                        "code_edges": 0,
+                        "edge_types": {},
+                    }
+                rel_map[key]["pom_dependency"] = True
+
+        node_by_id = {n.id: n for n in self.nodes}
+        for edge in self.edges:
+            source_node = node_by_id.get(edge.source)
+            target_node = node_by_id.get(edge.target)
+            if not source_node or not target_node:
+                continue
+
+            source_module = resolve_module_name(source_node.path)
+            target_module = resolve_module_name(target_node.path)
+            if not source_module or not target_module or source_module == target_module:
+                continue
+
+            key = (source_module, target_module)
+            if key not in rel_map:
+                rel_map[key] = {
+                    "from_module": source_module,
+                    "to_module": target_module,
+                    "pom_dependency": False,
+                    "code_edges": 0,
+                    "edge_types": {},
+                }
+
+            rel_map[key]["code_edges"] += 1
+            edge_type = edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            edge_types = rel_map[key]["edge_types"]
+            edge_types[edge_type] = edge_types.get(edge_type, 0) + 1
+
+        relationships = list(rel_map.values())
+        relationships.sort(key=lambda r: (r["code_edges"], r["pom_dependency"]), reverse=True)
+        return relationships[:100]
     
     def _identify_architecture_layers(self, class_nodes: List[CodeNode]) -> Dict[str, List[str]]:
         """

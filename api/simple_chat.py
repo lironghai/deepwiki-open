@@ -24,7 +24,7 @@ from api.prompts import (
     DEEP_RESEARCH_FIRST_ITERATION_PROMPT,
     DEEP_RESEARCH_FINAL_ITERATION_PROMPT,
     DEEP_RESEARCH_INTERMEDIATE_ITERATION_PROMPT,
-    SIMPLE_CHAT_SYSTEM_PROMPT
+    SIMPLE_CHAT_SYSTEM_PROMPT,
 )
 
 # Configure logging
@@ -78,6 +78,35 @@ class ChatCompletionRequest(BaseModel):
 async def chat_completions_stream(request: ChatCompletionRequest):
     """Stream a chat completion response directly using Google Generative AI"""
     try:
+        # Detect wiki-structure generation requests early.
+        last_user_content = ""
+        if request.messages and len(request.messages) > 0:
+            try:
+                candidate = request.messages[-1]
+                if hasattr(candidate, "content") and candidate.content:
+                    last_user_content = candidate.content
+            except Exception:
+                last_user_content = ""
+
+        wiki_structure_markers = [
+            "<wiki_structure>",
+            "create a wiki structure",
+            "determine the most logical structure for a wiki",
+            "return your analysis in the following xml format",
+            "return only the valid xml structure",
+            "生成 wiki 结构",
+            "生成wiki结构",
+            "返回 xml",
+            "返回xml",
+            "仅返回 xml",
+            "仅返回xml",
+            "no valid xml found in response",
+        ]
+        is_wiki_structure_request = any(
+            marker in (last_user_content or "").lower() for marker in wiki_structure_markers
+        )
+        retriever_ready = False
+
         # Check if request contains very large input
         input_too_large = False
         if request.messages and len(request.messages) > 0:
@@ -123,20 +152,33 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             logger.info(f"start init Rag prepare_retriever : {request.provider} {request.model}")
             request_rag.prepare_retriever(request.repo_url, request.type, request.token, excluded_dirs, excluded_files, included_dirs, included_files)
             logger.info(f"Retriever prepared for {request.repo_url}")
+            retriever_ready = True
         except ValueError as e:
             if "No valid documents with embeddings found" in str(e):
                 logger.error(f"No valid embeddings found: {str(e)}")
-                raise HTTPException(status_code=500, detail="No valid document embeddings found. This may be due to embedding size inconsistencies or API errors during document processing. Please try again or check your repository content.")
+                if is_wiki_structure_request:
+                    logger.warning("Wiki structure request detected. Continuing without retriever context.")
+                    retriever_ready = False
+                else:
+                    raise HTTPException(status_code=500, detail="No valid document embeddings found. This may be due to embedding size inconsistencies or API errors during document processing. Please try again or check your repository content.")
             else:
                 logger.error(f"ValueError preparing retriever: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
+                if is_wiki_structure_request:
+                    logger.warning("Wiki structure request detected. Continuing despite retriever preparation error.")
+                    retriever_ready = False
+                else:
+                    raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
         except Exception as e:
             logger.error(f"Error preparing retriever: {str(e)}")
             # Check for specific embedding-related errors
-            if "All embeddings should be of the same size" in str(e):
-                raise HTTPException(status_code=500, detail="Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
+            if is_wiki_structure_request:
+                logger.warning("Wiki structure request detected. Continuing despite retriever exception.")
+                retriever_ready = False
             else:
-                raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
+                if "All embeddings should be of the same size" in str(e):
+                    raise HTTPException(status_code=500, detail="Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
+                else:
+                    raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
 
         # Validate request
         if not request.messages or len(request.messages) == 0:
@@ -198,7 +240,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         context_text = ""
         retrieved_documents = None
 
-        if not input_too_large:
+        if not input_too_large and retriever_ready:
             try:
                 # If filePath exists, modify the query for RAG to focus on the file
                 rag_query = query
@@ -246,6 +288,10 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             except Exception as e:
                 logger.error(f"Error retrieving documents: {str(e)}")
                 context_text = ""
+        elif not retriever_ready:
+            logger.info("Skipping RAG retrieval because retriever is not ready")
+        else:
+            logger.info("Skipping RAG retrieval because input is too large")
 
         # Get repository information
         repo_url = request.repo_url
@@ -258,6 +304,21 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         language_code = request.language or configs["lang_config"]["default"]
         supported_langs = configs["lang_config"]["supported_languages"]
         language_name = supported_langs.get(language_code, "English")
+
+        # Fetch file content if provided (need it early for no-context check)
+        file_content = ""
+        if request.filePath:
+            try:
+                file_content = get_file_content(request.repo_url, request.filePath, request.type, request.token)
+                logger.info(f"Successfully retrieved content for file: {request.filePath}")
+            except Exception as e:
+                logger.error(f"Error retrieving file content: {str(e)}")
+
+        # Track context availability for prompt strategy.
+        has_rag_context = bool(context_text.strip())
+        has_file_context = bool(file_content.strip())
+        if not has_rag_context and not has_file_context:
+            logger.info("No retrieval context available; continuing generation with strict prompt guards")
 
         # Create system prompt
         if is_deep_research:
@@ -298,16 +359,6 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 language_name=language_name
             )
 
-        # Fetch file content if provided
-        file_content = ""
-        if request.filePath:
-            try:
-                file_content = get_file_content(request.repo_url, request.filePath, request.type, request.token)
-                logger.info(f"Successfully retrieved content for file: {request.filePath}")
-            except Exception as e:
-                logger.error(f"Error retrieving file content: {str(e)}")
-                # Continue without file content if there's an error
-
         # Format conversation history
         conversation_history = ""
         for turn_id, turn in request_rag.memory().items():
@@ -334,6 +385,19 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             # Add a note that we're skipping RAG due to size constraints or because it's the isolated API
             logger.info("No context available from RAG")
             prompt += "<note>Answering without retrieval augmentation.</note>\n\n"
+
+        # Hallucination guard for wiki-structure generation without retrieval context.
+        if is_wiki_structure_request and not has_rag_context and not has_file_context:
+            prompt += (
+                "<no_retrieval_guard>\n"
+                "No retrieval context is available for this request.\n"
+                "You MUST still return valid <wiki_structure> XML.\n"
+                "Use ONLY information explicitly present in the user query payload (file tree/readme/metadata).\n"
+                "Do NOT invent file paths, modules, classes, or APIs.\n"
+                "If details are uncertain, keep page descriptions high-level and conservative.\n"
+                "Every <file_path> must be chosen only from the provided file tree.\n"
+                "</no_retrieval_guard>\n\n"
+            )
 
         prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 

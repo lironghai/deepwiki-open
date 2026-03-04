@@ -411,6 +411,192 @@ def generate_json_export(repo_url: str, pages: List[WikiPage]) -> str:
     # Convert to JSON string with pretty formatting
     return json.dumps(export_data, indent=2)
 
+# --- Knowledge Base API Endpoints ---
+
+class KBStatsRequest(BaseModel):
+    repo_url: str = Field(..., description="URL or path of the repository")
+    repo_type: str = Field("github", description="Repository type")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+
+class KBStatsResponse(BaseModel):
+    status: str = Field(..., description="ready, not_found, error")
+    total_documents: int = Field(0)
+    valid_documents: int = Field(0)
+    embedding_dimension: int = Field(0)
+    unique_files: int = Field(0)
+    file_paths: List[str] = Field(default_factory=list)
+    db_file_size_bytes: int = Field(0)
+    file_type_distribution: Dict[str, int] = Field(default_factory=dict)
+    chunk_details: List[Dict[str, Any]] = Field(default_factory=list, description="Summary of each chunk")
+
+@app.post("/api/kb/stats", response_model=KBStatsResponse)
+async def get_kb_stats(request: KBStatsRequest):
+    """Return knowledge base statistics for a repository."""
+    try:
+        repo_url = request.repo_url.strip()
+        repo_name = _extract_repo_name(repo_url, request.repo_type)
+        root_path = get_adalflow_default_root_path()
+        db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
+
+        if not os.path.exists(db_file) or os.path.getsize(db_file) == 0:
+            return KBStatsResponse(status="not_found")
+
+        db_file_size = os.path.getsize(db_file)
+
+        from adalflow.core.db import LocalDB
+        db = LocalDB.load_state(db_file)
+        documents = db.get_transformed_data(key="split_and_embed")
+
+        if not documents:
+            return KBStatsResponse(status="not_found", db_file_size_bytes=db_file_size)
+
+        total_docs = len(documents)
+        valid_docs = [doc for doc in documents if _embedding_vector_length(doc) > 0]
+        valid_count = len(valid_docs)
+
+        embedding_dim = 0
+        if valid_docs:
+            embedding_dim = _embedding_vector_length(valid_docs[0])
+
+        file_paths_set = set()
+        file_type_dist: Dict[str, int] = {}
+        chunk_details = []
+
+        for i, doc in enumerate(valid_docs):
+            meta = getattr(doc, 'meta_data', {}) or {}
+            fp = meta.get('file_path', '')
+            if fp:
+                file_paths_set.add(fp)
+            ext = os.path.splitext(fp)[1] if fp else 'unknown'
+            file_type_dist[ext] = file_type_dist.get(ext, 0) + 1
+
+            text = getattr(doc, 'text', '') or ''
+            chunk_details.append({
+                "index": i,
+                "file_path": fp,
+                "type": meta.get('type', ''),
+                "title": meta.get('title', ''),
+                "token_count": meta.get('token_count', 0),
+                "is_chunk": meta.get('is_chunk', False),
+                "chunk_index": meta.get('chunk_index', None),
+                "text_preview": text[:200] + ('...' if len(text) > 200 else ''),
+            })
+
+        file_paths_list = sorted(file_paths_set)
+
+        return KBStatsResponse(
+            status="ready",
+            total_documents=total_docs,
+            valid_documents=valid_count,
+            embedding_dimension=embedding_dim,
+            unique_files=len(file_paths_set),
+            file_paths=file_paths_list,
+            db_file_size_bytes=db_file_size,
+            file_type_distribution=file_type_dist,
+            chunk_details=chunk_details,
+        )
+    except Exception as e:
+        logger.error(f"Error getting KB stats: {e}", exc_info=True)
+        return KBStatsResponse(status="error")
+
+
+class KBRetrievalTestRequest(BaseModel):
+    repo_url: str = Field(..., description="URL or path of the repository")
+    repo_type: str = Field("github", description="Repository type")
+    token: Optional[str] = Field(None, description="Access token for private repositories")
+    query: str = Field(..., description="Query to test retrieval")
+    provider: str = Field("google", description="Model provider for embedder")
+    model: Optional[str] = Field(None, description="Model name")
+    language: Optional[str] = Field("en", description="Language")
+    excluded_dirs: Optional[str] = Field(None)
+    excluded_files: Optional[str] = Field(None)
+    included_dirs: Optional[str] = Field(None)
+    included_files: Optional[str] = Field(None)
+
+class RetrievedChunk(BaseModel):
+    index: int = Field(..., description="Chunk index in results")
+    file_path: str = Field("")
+    title: str = Field("")
+    text: str = Field("")
+    token_count: int = Field(0)
+    is_chunk: bool = Field(False)
+    chunk_index: Optional[int] = Field(None)
+    meta_data: Dict[str, Any] = Field(default_factory=dict)
+
+class KBRetrievalTestResponse(BaseModel):
+    status: str = Field(..., description="success or error")
+    query: str = Field("")
+    total_retrieved: int = Field(0)
+    chunks: List[RetrievedChunk] = Field(default_factory=list)
+    error_message: Optional[str] = Field(None)
+
+@app.post("/api/kb/retrieval_test", response_model=KBRetrievalTestResponse)
+async def kb_retrieval_test(request: KBRetrievalTestRequest):
+    """Execute a RAG retrieval test and return the retrieved chunks."""
+    try:
+        from api.rag import RAG
+        from urllib.parse import unquote
+
+        rag = RAG(provider=request.provider, model=request.model)
+
+        excluded_dirs = None
+        excluded_files = None
+        included_dirs = None
+        included_files = None
+        if request.excluded_dirs:
+            excluded_dirs = [unquote(d) for d in request.excluded_dirs.split('\n') if d.strip()]
+        if request.excluded_files:
+            excluded_files = [unquote(f) for f in request.excluded_files.split('\n') if f.strip()]
+        if request.included_dirs:
+            included_dirs = [unquote(d) for d in request.included_dirs.split('\n') if d.strip()]
+        if request.included_files:
+            included_files = [unquote(f) for f in request.included_files.split('\n') if f.strip()]
+
+        rag.prepare_retriever(
+            request.repo_url, request.repo_type, request.token,
+            excluded_dirs, excluded_files, included_dirs, included_files
+        )
+
+        retrieved_documents = rag(request.query, language=request.language)
+
+        chunks: List[RetrievedChunk] = []
+        if retrieved_documents and retrieved_documents[0].documents:
+            for i, doc in enumerate(retrieved_documents[0].documents):
+                meta = getattr(doc, 'meta_data', {}) or {}
+                serializable_meta = {}
+                for k, v in meta.items():
+                    try:
+                        json.dumps(v)
+                        serializable_meta[k] = v
+                    except (TypeError, ValueError):
+                        serializable_meta[k] = str(v)
+
+                chunks.append(RetrievedChunk(
+                    index=i,
+                    file_path=meta.get('file_path', ''),
+                    title=meta.get('title', ''),
+                    text=getattr(doc, 'text', ''),
+                    token_count=meta.get('token_count', 0),
+                    is_chunk=meta.get('is_chunk', False),
+                    chunk_index=meta.get('chunk_index', None),
+                    meta_data=serializable_meta,
+                ))
+
+        return KBRetrievalTestResponse(
+            status="success",
+            query=request.query,
+            total_retrieved=len(chunks),
+            chunks=chunks,
+        )
+    except Exception as e:
+        logger.error(f"Error in retrieval test: {e}", exc_info=True)
+        return KBRetrievalTestResponse(
+            status="error",
+            query=request.query,
+            error_message=str(e),
+        )
+
+
 # Import the simplified chat implementation
 from api.simple_chat import chat_completions_stream
 from api.websocket_wiki import handle_websocket_chat

@@ -7,6 +7,7 @@ import ModelSelectionModal from '@/components/ModelSelectionModal';
 import ThemeToggle from '@/components/theme-toggle';
 import WikiTreeView from '@/components/WikiTreeView';
 import WikiEditor from '@/components/WikiEditor';
+import KnowledgeBase from '@/components/KnowledgeBase';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
@@ -15,7 +16,7 @@ import { getWebSocketUrl } from '@/utils/websocketClient';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram, FaEdit } from 'react-icons/fa';
+import { FaBitbucket, FaBookOpen, FaComments, FaDownload, FaExclamationTriangle, FaFileExport, FaFolder, FaGithub, FaGitlab, FaHome, FaSync, FaTimes, FaProjectDiagram, FaEdit, FaDatabase } from 'react-icons/fa';
 // Define the WikiSection and WikiStructure types directly in this file
 // since the imported types don't have the sections and rootSections properties
 interface WikiSection {
@@ -137,6 +138,76 @@ const addTokensToRequestBody = (
     requestBody.included_files = includedFiles;
   }
 
+};
+
+const NO_CONTEXT_MARKERS = [
+  '在项目代码库中未找到与您问题相关的信息',
+  '请尝试重新表述您的问题',
+  'No valid document embeddings found',
+  "I couldn't find relevant information in the project's codebase",
+];
+
+const sanitizeWikiPageContent = (
+  content: string,
+  pageTitle: string,
+  filePaths: string[],
+  language: string,
+  generateFileUrl: (path: string) => string,
+): string => {
+  const normalizedContent = (content || '').replace(/\s+/g, ' ').trim();
+  // Only treat as no-context when the response is essentially a short fallback sentence.
+  // Avoid overriding legitimately generated markdown that may quote similar wording.
+  const isShortResponse = normalizedContent.length <= 320;
+  const isNoContextContent = isShortResponse && NO_CONTEXT_MARKERS.some(marker => normalizedContent.includes(marker));
+  if (!isNoContextContent) return content;
+
+  const fallbackFiles = filePaths.slice(0, 12);
+  const fallbackFileList = fallbackFiles.length > 0
+    ? fallbackFiles.map(path => `- [${path}](${generateFileUrl(path)})`).join('\n')
+    : '- (No file paths were assigned to this page)';
+  const isZh = language === 'zh' || language === 'zh-tw';
+
+  if (isZh) {
+    return `<details>
+<summary>Relevant source files</summary>
+
+${fallbackFileList}
+</details>
+
+# ${pageTitle}
+
+当前请求未返回可用的细粒度检索内容，以下页面为保守兜底版本（基于已分配源码文件生成）。
+
+## 页面范围
+本页聚焦于「${pageTitle}」对应文件集合的职责、结构与可追踪入口，优先保证路径和事实可核对。
+
+## 关键文件
+${fallbackFileList}
+
+## 建议下一步
+- 先点击上面的源码文件逐个核对实现细节。
+- 如需更深内容，可重试页面生成或切换模型后再生成。`;
+  }
+
+  return `<details>
+<summary>Relevant source files</summary>
+
+${fallbackFileList}
+</details>
+
+# ${pageTitle}
+
+This response did not include usable retrieval-backed details, so this page is rendered with a conservative fallback generated from assigned source files.
+
+## Scope
+This page focuses on responsibilities, structure, and verifiable entry points for "${pageTitle}".
+
+## Key files
+${fallbackFileList}
+
+## Suggested next steps
+- Review the source files listed above for implementation-level details.
+- Regenerate this page (or switch model) for deeper technical coverage.`;
 };
 
 const createGithubHeaders = (githubToken: string): HeadersInit => {
@@ -281,6 +352,9 @@ export default function RepoWikiPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  // Active tab state: 'wiki' or 'kb' (knowledge base)
+  const [activeTab, setActiveTab] = useState<'wiki' | 'kb'>('wiki');
 
   // State for Ask modal
   const [isAskModalOpen, setIsAskModalOpen] = useState(false);
@@ -677,6 +751,13 @@ Remember:
 
         // Prepare request body
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // Attach one concrete file path so backend can inject real file content
+        // even when vector retrieval is weak/unavailable.
+        const prioritizedFilePath =
+          filePaths.find(p => /(^|\/)README(\.[^\/]+)?$/i.test(p)) ||
+          filePaths.find(p => /(^|\/)(package\.json|pyproject\.toml|pom\.xml)$/i.test(p)) ||
+          filePaths[0];
+
         const requestBody: Record<string, any> = {
           repo_url: repoUrl,
           type: effectiveRepoInfo.type,
@@ -685,6 +766,9 @@ Remember:
             content: promptContent
           }]
         };
+        if (prioritizedFilePath) {
+          requestBody.filePath = prioritizedFilePath;
+        }
 
         // Add tokens if available
         addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
@@ -792,6 +876,14 @@ Remember:
 
         // Clean up markdown delimiters
         content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
+
+        // Some providers may still return a generic "no info found" sentence.
+        // Convert that response into deterministic fallback markdown.
+        const sanitizedContent = sanitizeWikiPageContent(content, page.title, filePaths, language, generateFileUrl);
+        if (sanitizedContent !== content) {
+          content = sanitizedContent;
+          console.warn(`No-context content detected for ${page.title}; applied fallback page content.`);
+        }
 
         // Fill empty source citation URLs with proper repository file links
         content = fillSourceUrls(content);
@@ -1143,6 +1235,14 @@ Remember:
         console.warn('Failed to fetch codemap summary, proceeding without it:', error);
       }
 
+      const multiModuleRules = codemapSummary && codemapSummary.architecture_modules && codemapSummary.architecture_modules.length > 1
+        ? `7. For multi-module architecture, enforce layered wiki organization:
+   - At least one page per major module (or merge tiny modules with clear naming like "Shared/Utility Modules")
+   - At least 2 aggregation pages for cross-module workflows and integration
+   - Each module page must list files primarily from that module path
+   - Aggregation pages must include related_pages links to module pages`
+        : '';
+
       // Prepare request body
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const requestBody: Record<string, any> = {
@@ -1197,12 +1297,39 @@ ${codemapSummary.key_modules.slice(0, 20).map((m: any) => {
 ${codemapSummary.key_modules.length > 20 ? `\n(and ${codemapSummary.key_modules.length - 20} more modules)` : ''}
 ` : ''}
 
+${codemapSummary.architecture_modules && codemapSummary.architecture_modules.length > 0 ? `
+**Architecture Modules Detected:**
+${codemapSummary.architecture_modules.slice(0, 30).map((m: any) =>
+  `- **${m.name}** (\`${m.path}\`, packaging=${m.packaging || 'jar'})` +
+  ` | files=${m.file_count || 0}, classes=${m.class_count || 0}, functions=${m.function_count || 0}` +
+  `${m.languages && m.languages.length > 0 ? ` | langs=${m.languages.join(', ')}` : ''}`
+).join('\n')}
+${codemapSummary.architecture_modules.length > 30 ? `\n(and ${codemapSummary.architecture_modules.length - 30} more architecture modules)` : ''}
+` : ''}
+
+${codemapSummary.inter_module_relationships && codemapSummary.inter_module_relationships.length > 0 ? `
+**Inter-Module Relationships:**
+${codemapSummary.inter_module_relationships.slice(0, 30).map((r: any) =>
+  `- **${r.from_module} -> ${r.to_module}**` +
+  `${r.pom_dependency ? ' [pom-dependency]' : ''}` +
+  `${typeof r.code_edges === 'number' ? ` [code-edges=${r.code_edges}]` : ''}` +
+  `${r.edge_types && Object.keys(r.edge_types).length > 0 ? ` [types=${Object.entries(r.edge_types).map(([k, v]) => `${k}:${v}`).join(', ')}]` : ''}`
+).join('\n')}
+${codemapSummary.inter_module_relationships.length > 30 ? `\n(and ${codemapSummary.inter_module_relationships.length - 30} more inter-module relations)` : ''}
+` : ''}
+
 Based on this code structure analysis, please create wiki pages that:
 - Cover each architecture layer (controllers, services, models, etc.)
 - Document the key modules and their APIs in detail
 - Include class diagrams showing inheritance and implementation relationships
 - Explain the dependencies between modules
 - Provide comprehensive API documentation for important classes
+${codemapSummary.architecture_modules && codemapSummary.architecture_modules.length > 1 ? `
+- Use a **hierarchical module-first wiki plan**:
+  1) generate dedicated pages for each architecture module,
+  2) then generate upper-level aggregation pages for cross-module capabilities,
+  3) explicitly explain inter-module collaboration and dependency boundaries.
+` : ''}
 
 ` : ''}
 
@@ -1324,7 +1451,9 @@ CRITICAL RULES - MUST FOLLOW:
 5. Each page should reference AT LEAST 8-10 source files for comprehensive technical coverage
 4. If the repository has very few files (e.g., only README.md), create fewer pages accordingly. DO NOT create pages that reference non-existent files.
 5. Before adding any <file_path>, verify it exists in the <file_tree> above. Common files like .gitignore, package.json, tsconfig.json, etc. should ONLY be included if they are ACTUALLY in the file tree.
-6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
+6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters
+${multiModuleRules}
+`
         }]
       };
 
@@ -1438,11 +1567,54 @@ CRITICAL RULES - MUST FOLLOW:
 
       // Extract wiki structure from response
       const xmlMatch = responseText.match(/<wiki_structure>[\s\S]*?<\/wiki_structure>/m);
+      let xmlText = '';
       if (!xmlMatch) {
-        throw new Error('No valid XML found in response');
+        const plainResponse = responseText
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const responsePreview = plainResponse.slice(0, 400);
+
+        // Last-resort fallback: build conservative structure from file tree
+        // to avoid blocking the whole wiki flow when model formatting fails.
+        const fileCandidates = actualFileTree
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line && !line.endsWith('/'));
+        const dedupedFiles = Array.from(new Set(fileCandidates));
+        const maxPages = isComprehensiveView ? 8 : 4;
+        const filesPerPage = isComprehensiveView ? 8 : 5;
+        const selectedFiles = dedupedFiles.slice(0, maxPages * filesPerPage);
+        const pagesXml: string[] = [];
+        for (let i = 0; i < maxPages; i++) {
+          const start = i * filesPerPage;
+          const pageFiles = selectedFiles.slice(start, start + filesPerPage);
+          if (pageFiles.length === 0) break;
+          pagesXml.push(`
+    <page id="page-${i + 1}">
+      <title>${i === 0 ? 'Project Overview' : `Module Overview ${i}`}</title>
+      <description>Auto-generated fallback structure due to non-XML model output. Please refresh/regenerate for richer structure.</description>
+      <importance>${i < 2 ? 'high' : 'medium'}</importance>
+      <relevant_files>
+${pageFiles.map(fp => `        <file_path>${fp}</file_path>`).join('\n')}
+      </relevant_files>
+      <related_pages></related_pages>
+    </page>`);
+        }
+
+        xmlText = `<wiki_structure>
+  <title>${owner}/${repo} Wiki</title>
+  <description>Fallback wiki structure generated from repository file tree. Raw model preview: ${responsePreview || 'empty'}</description>
+  <pages>
+${pagesXml.join('\n')}
+  </pages>
+</wiki_structure>`;
+
+        console.warn('No valid XML returned by model, using fallback wiki structure.');
+      } else {
+        xmlText = xmlMatch[0];
       }
 
-      let xmlText = xmlMatch[0];
       xmlText = xmlText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
       // Try parsing with DOMParser
       const parser = new DOMParser();
@@ -1512,6 +1684,41 @@ CRITICAL RULES - MUST FOLLOW:
           relatedPages
         });
       });
+
+      // Additional safety net:
+      // Some models return <wiki_structure> but with non-standard page schema
+      // (e.g., missing <page id=...> blocks). In that case, synthesize pages
+      // from file tree to keep wiki generation functional.
+      if (pages.length === 0) {
+        const fileCandidates = actualFileTree
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line && !line.endsWith('/'));
+        const dedupedFiles = Array.from(new Set(fileCandidates));
+        const fallbackPageCount = isComprehensiveView ? 8 : 4;
+        const fallbackFilesPerPage = isComprehensiveView ? 8 : 5;
+        const selectedFiles = dedupedFiles.slice(0, fallbackPageCount * fallbackFilesPerPage);
+
+        for (let i = 0; i < fallbackPageCount; i++) {
+          const start = i * fallbackFilesPerPage;
+          const pageFiles = selectedFiles.slice(start, start + fallbackFilesPerPage);
+          if (pageFiles.length === 0) break;
+          pages.push({
+            id: `page-${i + 1}`,
+            title: i === 0 ? 'Project Overview' : `Module Overview ${i}`,
+            content: '',
+            filePaths: pageFiles,
+            importance: i < 2 ? 'high' : 'medium',
+            relatedPages: i > 0 ? ['page-1'] : []
+          });
+        }
+
+        if (!title) title = `${owner}/${repo} Wiki`;
+        if (!description) {
+          description = 'Auto-generated fallback wiki structure due to non-standard model XML output.';
+        }
+        console.warn('No standard <page> nodes found in XML. Using synthesized fallback pages.');
+      }
 
       // Extract sections if they exist in the XML
       const sections: WikiSection[] = [];
@@ -2599,7 +2806,7 @@ CRITICAL RULES - MUST FOLLOW:
         ) : wikiStructure ? (
           <div className="h-full overflow-y-auto flex flex-col lg:flex-row gap-4 w-full overflow-hidden bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
             {/* Wiki Navigation */}
-            <div className="h-full w-full lg:w-[280px] xl:w-[320px] flex-shrink-0 bg-[var(--background)]/50 rounded-lg rounded-r-none p-5 border-b lg:border-b-0 lg:border-r border-[var(--border-color)] overflow-y-auto">
+            <div className="h-full w-full lg:w-[280px] xl:w-[320px] flex-shrink-0 bg-[var(--background)]/50 rounded-lg rounded-r-none p-5 border-b lg:border-b-0 lg:border-r border-[var(--border-color)] overflow-y-auto relative z-0">
               <h3 className="text-lg font-bold text-[var(--foreground)] mb-3 font-serif">{wikiStructure.title}</h3>
               <p className="text-[var(--muted)] text-sm mb-5 leading-relaxed">{wikiStructure.description}</p>
 
@@ -2709,74 +2916,132 @@ CRITICAL RULES - MUST FOLLOW:
               />
             </div>
 
-            {/* Wiki Content */}
-            <div id="wiki-content" className="w-full flex-grow p-6 lg:p-8 overflow-y-auto">
-              {currentPageId && generatedPages[currentPageId] ? (
-                <div className="w-full mx-auto h-full flex flex-col">
-                  {isEditing && editingPageId === currentPageId ? (
-                    <WikiEditor
-                      pageId={currentPageId}
-                      initialTitle={generatedPages[currentPageId].title}
-                      initialContent={generatedPages[currentPageId].content}
-                      onSave={handleSavePage}
-                      onCancel={handleCancelEdit}
-                      isSaving={isSaving}
-                    />
-                  ) : (
-                    <>
-                      <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-xl font-bold text-[var(--foreground)] break-words font-serif flex-1">
-                          {generatedPages[currentPageId].title}
-                        </h3>
-                        <button
-                          onClick={handleEditPage}
-                          className="ml-4 px-3 py-1.5 rounded-md bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-[var(--accent-primary)] transition-colors flex items-center gap-2 text-sm"
-                          title="编辑页面"
-                        >
-                          <FaEdit />
-                          编辑
-                        </button>
-                      </div>
+            {/* Right Panel: Tabs + Content */}
+            <div className="w-full flex-grow flex flex-col overflow-hidden relative z-[1]">
+              {/* Tab Bar */}
+              <div className="flex border-b border-[var(--border-color)] bg-[var(--background)]/30 px-4 flex-shrink-0 relative z-[2]">
+                <button
+                  onClick={() => setActiveTab('wiki')}
+                  className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                    activeTab === 'wiki'
+                      ? 'text-[var(--accent-primary)]'
+                      : 'text-[var(--muted)] hover:text-[var(--foreground)]'
+                  }`}
+                >
+                  <FaBookOpen className="text-xs" />
+                  Wiki
+                  {activeTab === 'wiki' && (
+                    <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--accent-primary)]" />
+                  )}
+                </button>
+                <button
+                  onClick={() => setActiveTab('kb')}
+                  className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                    activeTab === 'kb'
+                      ? 'text-[var(--accent-primary)]'
+                      : 'text-[var(--muted)] hover:text-[var(--foreground)]'
+                  }`}
+                >
+                  <FaDatabase className="text-xs" />
+                  Knowledge Base
+                  {activeTab === 'kb' && (
+                    <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--accent-primary)]" />
+                  )}
+                </button>
+              </div>
 
-                      <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none flex-1">
-                        <Markdown
-                          content={generatedPages[currentPageId].content}
+              {/* Tab Content */}
+              {activeTab === 'wiki' ? (
+                <div id="wiki-content" className="w-full flex-grow p-6 lg:p-8 overflow-y-auto">
+                  {currentPageId && generatedPages[currentPageId] ? (
+                    <div className="w-full mx-auto h-full flex flex-col">
+                      {isEditing && editingPageId === currentPageId ? (
+                        <WikiEditor
+                          pageId={currentPageId}
+                          initialTitle={generatedPages[currentPageId].title}
+                          initialContent={sanitizeWikiPageContent(
+                            generatedPages[currentPageId].content,
+                            generatedPages[currentPageId].title,
+                            generatedPages[currentPageId].filePaths,
+                            language,
+                            generateFileUrl
+                          )}
+                          onSave={handleSavePage}
+                          onCancel={handleCancelEdit}
+                          isSaving={isSaving}
                         />
-                      </div>
-
-                      {generatedPages[currentPageId].relatedPages.length > 0 && (
-                        <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
-                          <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
-                            {messages.repoPage?.relatedPages || 'Related Pages:'}
-                          </h4>
-                          <div className="flex flex-wrap gap-2">
-                            {generatedPages[currentPageId].relatedPages.map(relatedId => {
-                              const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
-                              return relatedPage ? (
-                                <button
-                                  key={relatedId}
-                                  className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
-                                  onClick={() => handlePageSelect(relatedId)}
-                                >
-                                  {relatedPage.title}
-                                </button>
-                              ) : null;
-                            })}
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-xl font-bold text-[var(--foreground)] break-words font-serif flex-1">
+                              {generatedPages[currentPageId].title}
+                            </h3>
+                            <button
+                              onClick={handleEditPage}
+                              className="ml-4 px-3 py-1.5 rounded-md bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-[var(--accent-primary)] transition-colors flex items-center gap-2 text-sm"
+                              title="编辑页面"
+                            >
+                              <FaEdit />
+                              编辑
+                            </button>
                           </div>
-                        </div>
+
+                          <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none flex-1">
+                            <Markdown
+                              content={sanitizeWikiPageContent(
+                                generatedPages[currentPageId].content,
+                                generatedPages[currentPageId].title,
+                                generatedPages[currentPageId].filePaths,
+                                language,
+                                generateFileUrl
+                              )}
+                            />
+                          </div>
+
+                          {generatedPages[currentPageId].relatedPages.length > 0 && (
+                            <div className="mt-8 pt-4 border-t border-[var(--border-color)]">
+                              <h4 className="text-sm font-semibold text-[var(--muted)] mb-3">
+                                {messages.repoPage?.relatedPages || 'Related Pages:'}
+                              </h4>
+                              <div className="flex flex-wrap gap-2">
+                                {generatedPages[currentPageId].relatedPages.map(relatedId => {
+                                  const relatedPage = wikiStructure.pages.find(p => p.id === relatedId);
+                                  return relatedPage ? (
+                                    <button
+                                      key={relatedId}
+                                      className="bg-[var(--accent-primary)]/10 hover:bg-[var(--accent-primary)]/20 text-xs text-[var(--accent-primary)] px-3 py-1.5 rounded-md transition-colors truncate max-w-full border border-[var(--accent-primary)]/20"
+                                      onClick={() => handlePageSelect(relatedId)}
+                                    >
+                                      {relatedPage.title}
+                                    </button>
+                                  ) : null;
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </>
                       )}
-                    </>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center p-8 text-[var(--muted)] h-full">
+                      <div className="relative mb-4">
+                        <div className="absolute -inset-2 bg-[var(--accent-primary)]/5 rounded-full blur-md"></div>
+                        <FaBookOpen className="text-4xl relative z-10" />
+                      </div>
+                      <p className="font-serif">
+                        {messages.repoPage?.selectPagePrompt || 'Select a page from the navigation to view its content'}
+                      </p>
+                    </div>
                   )}
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center p-8 text-[var(--muted)] h-full">
-                  <div className="relative mb-4">
-                    <div className="absolute -inset-2 bg-[var(--accent-primary)]/5 rounded-full blur-md"></div>
-                    <FaBookOpen className="text-4xl relative z-10" />
-                  </div>
-                  <p className="font-serif">
-                    {messages.repoPage?.selectPagePrompt || 'Select a page from the navigation to view its content'}
-                  </p>
+                <div className="w-full flex-grow p-6 lg:p-8 overflow-y-auto">
+                  <KnowledgeBase
+                    repoInfo={effectiveRepoInfo}
+                    provider={selectedProviderState}
+                    model={selectedModelState}
+                    language={language}
+                  />
                 </div>
               )}
             </div>

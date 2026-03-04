@@ -3,16 +3,27 @@ Layered RAG Retrieval System
 
 Implements a 3-layer RAG architecture with codemap integration:
 - Layer 1: Keyword matching (fast filtering)
-- Layer 2: Semantic similarity (precise retrieval)
+- Layer 2: Semantic similarity + grep hybrid (precise retrieval)
 - Layer 3: Context expansion (dependency-based)
 """
 
+import os
 import time
 import logging
 from typing import List, Dict, Set, Any, Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# Lazy import to avoid circular dependency; will be resolved at first use.
+_GrepRetriever = None
+
+def _get_grep_retriever_class():
+    global _GrepRetriever
+    if _GrepRetriever is None:
+        from api.tools.grep_retriever import GrepRetriever
+        _GrepRetriever = GrepRetriever
+    return _GrepRetriever
 
 
 @dataclass
@@ -189,6 +200,11 @@ class DependencyContextExpander:
         return result
 
 
+# Minimum similarity score (prob metric [0,1]) to use a document. Below this we treat as
+# no relevant context to avoid feeding weak matches to the LLM (hallucination).
+MIN_RELEVANCE_SCORE = 0.45
+
+
 class LayeredRAG:
     """
     Three-layer RAG retrieval system
@@ -215,6 +231,7 @@ class LayeredRAG:
         """
         self.base_rag = base_rag
         self.codemap_cache = codemap_cache_manager
+        self.grep_retriever = None
 
         # Layer configurations
         self.layer_configs = {
@@ -222,6 +239,16 @@ class LayeredRAG:
             'layer_2': {'enabled': True, 'timeout_ms': 500},
             'layer_3': {'enabled': True, 'timeout_ms': 300}
         }
+
+        # Initialize GrepRetriever if repo_path is available
+        repo_path = getattr(base_rag, 'repo_path', None)
+        if repo_path and os.path.isdir(repo_path):
+            try:
+                GrepRetrieverCls = _get_grep_retriever_class()
+                self.grep_retriever = GrepRetrieverCls(repo_path)
+                logger.info(f"GrepRetriever initialized for {repo_path}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize GrepRetriever: {e}")
 
     def retrieve(self, query: str, repo_path: str, num_docs: int = 10) -> RAGLayerResult:
         """
@@ -243,11 +270,13 @@ class LayeredRAG:
         # === Layer 1: Keyword matching ===
         layer_1_result = self._layer_1_keyword_matching(query, codemap)
 
-        if not layer_1_result['needs_deeper_retrieval']:
-            # If Layer 1 is sufficient, return immediately
+        # Only skip Layer 2 when we have actual docs from Layer 1 (e.g. from codemap).
+        # Never return empty: global/overview questions (e.g. "项目是微服务架构吗") need semantic retrieval.
+        filtered_from_layer1 = layer_1_result.get('filtered_docs', [])
+        if not layer_1_result['needs_deeper_retrieval'] and filtered_from_layer1:
             execution_time = (time.time() - start_time) * 1000
             return RAGLayerResult(
-                documents=layer_1_result.get('filtered_docs', [])[:num_docs],
+                documents=filtered_from_layer1[:num_docs],
                 layer_name='layer_1',
                 codemap_used=layer_1_result['codemap_used'],
                 execution_time_ms=execution_time,
@@ -261,9 +290,39 @@ class LayeredRAG:
             layer_1_result
         )
 
+        # === Layer 2.5: Grep retrieval (hybrid) ===
+        grep_metadata: Dict[str, Any] = {'enabled': False}
+        merged_docs = layer_2_result['documents']
+
+        if self.grep_retriever:
+            try:
+                grep_docs = self.grep_retriever.retrieve_documents(
+                    query,
+                    self.base_rag.transformed_docs,
+                    max_docs=5,
+                )
+                if grep_docs:
+                    merged_docs = self._merge_documents(
+                        layer_2_result['documents'], grep_docs
+                    )
+                    grep_metadata = {
+                        'enabled': True,
+                        'grep_doc_count': len(grep_docs),
+                        'merged_doc_count': len(merged_docs),
+                    }
+                    logger.info(
+                        f"Layer 2.5 grep: {len(grep_docs)} grep docs, "
+                        f"merged total {len(merged_docs)}"
+                    )
+                else:
+                    grep_metadata = {'enabled': True, 'grep_doc_count': 0}
+            except Exception as e:
+                logger.warning(f"Grep retrieval failed, continuing without: {e}")
+                grep_metadata = {'enabled': True, 'error': str(e)}
+
         # === Layer 3: Context expansion ===
         layer_3_result = self._layer_3_context_expansion(
-            layer_2_result['documents'],
+            merged_docs,
             codemap
         )
 
@@ -277,6 +336,7 @@ class LayeredRAG:
             metadata={
                 'layer_1': layer_1_result,
                 'layer_2': layer_2_result,
+                'layer_2_5_grep': grep_metadata,
                 'layer_3': {'document_count': len(layer_3_result)}
             }
         )
@@ -308,8 +368,15 @@ class LayeredRAG:
         needs_codemap = codemap_type is not None
         codemap_used = needs_codemap and (codemap is not None)
 
-        # For simple queries without structure keywords, skip Layer 2/3
-        needs_deeper_retrieval = needs_codemap or len(query.split()) > 3
+        # Require semantic retrieval (Layer 2) for: structure keywords, or multi-word query, or
+        # longer text (e.g. Chinese sentences without spaces - len(query.split()) can be 1).
+        word_count = len(query.split())
+        char_count = len(query.strip())
+        needs_deeper_retrieval = (
+            needs_codemap
+            or word_count > 3
+            or (char_count >= 5 and word_count >= 1)  # e.g. "项目是微服务架构吗" -> always Layer 2
+        )
 
         result = {
             'needs_codemap': needs_codemap,
@@ -358,11 +425,30 @@ class LayeredRAG:
 
             # Extract documents from retriever result
             if retrieved_documents and len(retrieved_documents) > 0:
-                doc_indices = retrieved_documents[0].doc_indices
+                out = retrieved_documents[0]
+                doc_indices = out.doc_indices
+                doc_scores = getattr(out, 'doc_scores', None)
                 documents = [
                     self.base_rag.transformed_docs[idx]
                     for idx in doc_indices
                 ]
+                # Filter by relevance: only keep docs above threshold to avoid hallucination
+                if doc_scores is not None and len(doc_scores) == len(documents):
+                    filtered = [
+                        (doc, score)
+                        for doc, score in zip(documents, doc_scores)
+                        if score >= MIN_RELEVANCE_SCORE
+                    ]
+                    documents = [d for d, _ in filtered]
+                    if filtered:
+                        scores_used = [s for _, s in filtered]
+                        logger.info(
+                            f"Layer 2: Kept {len(documents)}/{len(doc_indices)} docs above score {MIN_RELEVANCE_SCORE}, scores={scores_used[:5]}"
+                        )
+                    else:
+                        logger.info(
+                            f"Layer 2: All {len(doc_indices)} docs below relevance {MIN_RELEVANCE_SCORE}, returning none to avoid hallucination"
+                        )
             else:
                 documents = []
 
@@ -419,6 +505,36 @@ class LayeredRAG:
             logger.error(f"Layer 3 expansion error: {e}")
             # Fallback: return Layer 2 documents
             return documents
+
+    @staticmethod
+    def _merge_documents(semantic_docs: List, grep_docs: List) -> List:
+        """
+        Merge semantic (FAISS) and grep retrieval results.
+
+        Semantic results are kept in original order (higher priority).
+        Grep-only results are appended after, deduplicated by file_path.
+        """
+        seen_files: Set[str] = set()
+        merged: List = []
+
+        for doc in semantic_docs:
+            fp = ''
+            if hasattr(doc, 'meta_data'):
+                fp = doc.meta_data.get('file_path', '')
+            merged.append(doc)
+            if fp:
+                seen_files.add(fp.replace('\\', '/'))
+
+        for doc in grep_docs:
+            fp = ''
+            if hasattr(doc, 'meta_data'):
+                fp = doc.meta_data.get('file_path', '')
+            fp_normalized = fp.replace('\\', '/') if fp else ''
+            if fp_normalized and fp_normalized not in seen_files:
+                merged.append(doc)
+                seen_files.add(fp_normalized)
+
+        return merged
 
     def _extract_codemap_entities(self, codemap: Dict, codemap_type: Optional[str]) -> List[str]:
         """
