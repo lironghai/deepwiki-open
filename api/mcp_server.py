@@ -545,9 +545,11 @@ async def perform_rag_query(
         prompt += f"<currentFileContent path=\"{file_path}\">\n{file_content}\n</currentFileContent>\n\n"
     
     if context_text.strip():
-        prompt += f"<START_OF_CONTEXT>\n{context_text}\n<END_OF_CONTEXT>\n\n"
+        prompt += "<START_OF_CONTEXT>\n"
+        prompt += "The following are ACTUAL code snippets retrieved from the repository. You MUST ONLY reference files and code that appear below. Do NOT invent or fabricate any file paths or code not shown here.\n"
+        prompt += f"{context_text}\n<END_OF_CONTEXT>\n\n"
     else:
-        prompt += "<note>Answering without retrieval augmentation.</note>\n\n"
+        prompt += "<note>No relevant code snippets were retrieved from the repository. You should inform the user that you cannot find relevant information in the repository context rather than guessing.</note>\n\n"
     
     prompt += f"<query>\n{question}\n</query>\n\nAssistant: "
     
@@ -659,7 +661,9 @@ async def perform_deep_research_iterations(
         prompt += f"<conversation_history>\n{conversation_history}</conversation_history>\n\n"
         
         if context_text.strip():
-            prompt += f"<START_OF_CONTEXT>\n{context_text}\n<END_OF_CONTEXT>\n\n"
+            prompt += "<START_OF_CONTEXT>\n"
+            prompt += "The following are ACTUAL code snippets retrieved from the repository. You MUST ONLY reference files and code that appear below. Do NOT invent or fabricate any file paths or code not shown here.\n"
+            prompt += f"{context_text}\n<END_OF_CONTEXT>\n\n"
         
         prompt += f"<query>\nContinue the research on: {question}\n</query>\n\nAssistant: "
         

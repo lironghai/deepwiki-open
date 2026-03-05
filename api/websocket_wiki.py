@@ -25,12 +25,20 @@ from api.openrouter_client import OpenRouterClient
 from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
 from api.rag import RAG
+from api.prompts import (
+    DEEP_RESEARCH_FIRST_ITERATION_PROMPT,
+    DEEP_RESEARCH_FINAL_ITERATION_PROMPT,
+    DEEP_RESEARCH_INTERMEDIATE_ITERATION_PROMPT,
+    SIMPLE_CHAT_SYSTEM_PROMPT,
+)
 
 # Configure logging
 from api.logging_config import setup_logging
 
 # Import MermaidPreprocessor for response preprocessing
 from api.tools.mermaid_preprocessor import MermaidPreprocessor
+from api.tools.agent_tools import supports_tool_calling
+from api.tools.tool_call_handler import run_agent_loop
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -355,140 +363,35 @@ async def handle_websocket_chat(websocket: WebSocket):
             is_final_iteration = research_iteration >= 5
 
             if is_first_iteration:
-                system_prompt = f"""<role>
-You are an expert code analyst examining the {repo_type} repository: {repo_url} ({repo_name}).
-You are conducting a multi-turn Deep Research process to thoroughly investigate the specific topic in the user's query.
-Your goal is to provide detailed, focused information EXCLUSIVELY about this topic.
-IMPORTANT:You MUST respond in {language_name} language.
-</role>
-
-<guidelines>
-- This is the first iteration of a multi-turn research process focused EXCLUSIVELY on the user's query
-- Start your response with "## Research Plan"
-- Outline your approach to investigating this specific topic
-- If the topic is about a specific file or feature (like "Dockerfile"), focus ONLY on that file or feature
-- Clearly state the specific topic you're researching to maintain focus throughout all iterations
-- Identify the key aspects you'll need to research
-- Provide initial findings based on the information available
-- End with "## Next Steps" indicating what you'll investigate in the next iteration
-- Do NOT provide a final conclusion yet - this is just the beginning of the research
-- Do NOT include general repository information unless directly relevant to the query
-- Focus EXCLUSIVELY on the specific topic being researched - do not drift to related topics
-- Your research MUST directly address the original question
-- NEVER respond with just "Continue the research" as an answer - always provide substantive research findings
-- Remember that this topic will be maintained across all research iterations
-</guidelines>
-
-<style>
-- Be concise but thorough
-- Use markdown formatting to improve readability
-- Cite specific files and code sections when relevant
-</style>"""
+                system_prompt = DEEP_RESEARCH_FIRST_ITERATION_PROMPT.format(
+                    repo_type=repo_type,
+                    repo_url=repo_url,
+                    repo_name=repo_name,
+                    language_name=language_name
+                )
             elif is_final_iteration:
-                system_prompt = f"""<role>
-You are an expert code analyst examining the {repo_type} repository: {repo_url} ({repo_name}).
-You are in the final iteration of a Deep Research process focused EXCLUSIVELY on the latest user query.
-Your goal is to synthesize all previous findings and provide a comprehensive conclusion that directly addresses this specific topic and ONLY this topic.
-IMPORTANT:You MUST respond in {language_name} language.
-</role>
-
-<guidelines>
-- This is the final iteration of the research process
-- CAREFULLY review the entire conversation history to understand all previous findings
-- Synthesize ALL findings from previous iterations into a comprehensive conclusion
-- Start with "## Final Conclusion"
-- Your conclusion MUST directly address the original question
-- Stay STRICTLY focused on the specific topic - do not drift to related topics
-- Include specific code references and implementation details related to the topic
-- Highlight the most important discoveries and insights about this specific functionality
-- Provide a complete and definitive answer to the original question
-- Do NOT include general repository information unless directly relevant to the query
-- Focus exclusively on the specific topic being researched
-- NEVER respond with "Continue the research" as an answer - always provide a complete conclusion
-- If the topic is about a specific file or feature (like "Dockerfile"), focus ONLY on that file or feature
-- Ensure your conclusion builds on and references key findings from previous iterations
-</guidelines>
-
-<style>
-- Be concise but thorough
-- Use markdown formatting to improve readability
-- Cite specific files and code sections when relevant
-- Structure your response with clear headings
-- End with actionable insights or recommendations when appropriate
-</style>"""
+                system_prompt = DEEP_RESEARCH_FINAL_ITERATION_PROMPT.format(
+                    repo_type=repo_type,
+                    repo_url=repo_url,
+                    repo_name=repo_name,
+                    research_iteration=research_iteration,
+                    language_name=language_name
+                )
             else:
-                system_prompt = f"""<role>
-You are an expert code analyst examining the {repo_type} repository: {repo_url} ({repo_name}).
-You are currently in iteration {research_iteration} of a Deep Research process focused EXCLUSIVELY on the latest user query.
-Your goal is to build upon previous research iterations and go deeper into this specific topic without deviating from it.
-IMPORTANT:You MUST respond in {language_name} language.
-</role>
-
-<guidelines>
-- CAREFULLY review the conversation history to understand what has been researched so far
-- Your response MUST build on previous research iterations - do not repeat information already covered
-- Identify gaps or areas that need further exploration related to this specific topic
-- Focus on one specific aspect that needs deeper investigation in this iteration
-- Start your response with "## Research Update {research_iteration}"
-- Clearly explain what you're investigating in this iteration
-- Provide new insights that weren't covered in previous iterations
-- If this is iteration 3, prepare for a final conclusion in the next iteration
-- Do NOT include general repository information unless directly relevant to the query
-- Focus EXCLUSIVELY on the specific topic being researched - do not drift to related topics
-- If the topic is about a specific file or feature (like "Dockerfile"), focus ONLY on that file or feature
-- NEVER respond with just "Continue the research" as an answer - always provide substantive research findings
-- Your research MUST directly address the original question
-- Maintain continuity with previous research iterations - this is a continuous investigation
-</guidelines>
-
-<style>
-- Be concise but thorough
-- Focus on providing new information, not repeating what's already been covered
-- Use markdown formatting to improve readability
-- Cite specific files and code sections when relevant
-</style>"""
+                system_prompt = DEEP_RESEARCH_INTERMEDIATE_ITERATION_PROMPT.format(
+                    repo_type=repo_type,
+                    repo_url=repo_url,
+                    repo_name=repo_name,
+                    research_iteration=research_iteration,
+                    language_name=language_name
+                )
         else:
-            system_prompt = f"""<role>
-You are an expert code analyst examining the {repo_type} repository: {repo_url} ({repo_name}).
-You provide direct, concise, and accurate information about code repositories.
-You NEVER start responses with markdown headers or code fences.
-IMPORTANT:You MUST respond in {language_name} language.
-</role>
-
-<guidelines>
-- Answer the user's question directly without ANY preamble or filler phrases
-- DO NOT include any rationale, explanation, or extra comments.
-- Strictly base answers ONLY on existing code or documents
-- DO NOT speculate or invent citations.
-- DO NOT start with preambles like "Okay, here's a breakdown" or "Here's an explanation"
-- DO NOT start with markdown headers like "## Analysis of..." or any file path references
-- DO NOT start with ```markdown code fences
-- DO NOT end your response with ``` closing fences
-- DO NOT start by repeating or acknowledging the question
-- JUST START with the direct answer to the question
-
-<example_of_what_not_to_do>
-```markdown
-## Analysis of `adalflow/adalflow/datasets/gsm8k.py`
-
-This file contains...
-```
-</example_of_what_not_to_do>
-
-- Format your response with proper markdown including headings, lists, and code blocks WITHIN your answer
-- For code analysis, organize your response with clear sections
-- Think step by step and structure your answer logically
-- Start with the most relevant information that directly addresses the user's query
-- Be precise and technical when discussing code
-- Your response language should be in the same language as the user's query
-</guidelines>
-
-<style>
-- Use concise, direct language
-- Prioritize accuracy over verbosity
-- When showing code, include line numbers and file paths when relevant
-- Use markdown formatting to improve readability
-</style>"""
+            system_prompt = SIMPLE_CHAT_SYSTEM_PROMPT.format(
+                repo_type=repo_type,
+                repo_url=repo_url,
+                repo_name=repo_name,
+                language_name=language_name
+            )
 
         # Fetch file content if provided
         file_content = ""
@@ -517,15 +420,15 @@ This file contains...
             # Add file content to the prompt after conversation history
             prompt += f"<currentFileContent path=\"{request.filePath}\">\n{file_content}\n</currentFileContent>\n\n"
 
-        # Only include context if it's not empty
         CONTEXT_START = "<START_OF_CONTEXT>"
         CONTEXT_END = "<END_OF_CONTEXT>"
         if context_text.strip():
-            prompt += f"{CONTEXT_START}\n{context_text}\n{CONTEXT_END}\n\n"
+            prompt += f"{CONTEXT_START}\n"
+            prompt += "The following are ACTUAL code snippets retrieved from the repository. You MUST ONLY reference files and code that appear below. Do NOT invent or fabricate any file paths or code not shown here.\n"
+            prompt += f"{context_text}\n{CONTEXT_END}\n\n"
         else:
-            # Add a note that we're skipping RAG due to size constraints or because it's the isolated API
             logger.info("No context available from RAG")
-            prompt += "<note>Answering without retrieval augmentation.</note>\n\n"
+            prompt += "<note>No relevant code snippets were retrieved from the repository. You should inform the user that you cannot find relevant information in the repository context rather than guessing.</note>\n\n"
 
         # Inject codemap context if available (for code structure questions)
         if codemap_context.strip():
@@ -670,55 +573,45 @@ This file contains...
 
         # Process the response based on the provider
         try:
-            if request.provider == "ollama":
-                # Get the response and handle it properly using the previously created api_kwargs
+            if supports_tool_calling(request.provider):
+                # --- Agentic RAG: tool-calling loop for capable providers ---
+                try:
+                    import json as _json
+                    agent_model_kwargs = {
+                        "model": request.model or model_config.get("model"),
+                        "temperature": model_config.get("temperature", 0.7),
+                    }
+                    if "top_p" in model_config:
+                        agent_model_kwargs["top_p"] = model_config["top_p"]
+
+                    async for msg in run_agent_loop(
+                        provider=request.provider,
+                        model_client=model,
+                        model_kwargs=agent_model_kwargs,
+                        initial_prompt=prompt,
+                        rag_instance=request_rag,
+                        repo_path=getattr(request_rag, "repo_path", None),
+                    ):
+                        msg_type = msg.get("type")
+                        if msg_type == "content":
+                            await websocket.send_text(msg.get("delta", ""))
+                        elif msg_type == "error":
+                            await websocket.send_text(f"\nError: {msg.get('message', 'Unknown error')}")
+                        else:
+                            await websocket.send_text(_json.dumps(msg, ensure_ascii=False))
+                    await websocket.close()
+                except Exception as e_agent:
+                    logger.error(f"Agent loop error: {e_agent}")
+                    await websocket.send_text(f"\nError: {str(e_agent)}")
+                    await websocket.close()
+            elif request.provider == "ollama":
                 response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                # Handle streaming response from Ollama
                 async for chunk in response:
                     text = getattr(chunk, 'response', None) or getattr(chunk, 'text', None) or str(chunk)
                     if text and not text.startswith('model=') and not text.startswith('created_at='):
                         text = text.replace('<think>', '').replace('</think>', '')
                         await websocket.send_text(text)
-                # Explicitly close the WebSocket connection after the response is complete
                 await websocket.close()
-            elif request.provider == "openrouter":
-                try:
-                    # Get the response and handle it properly using the previously created api_kwargs
-                    logger.info("Making OpenRouter API call")
-                    response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                    # Handle streaming response from OpenRouter
-                    async for chunk in response:
-                        await websocket.send_text(chunk)
-                    # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
-                except Exception as e_openrouter:
-                    logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
-                    error_msg = f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                    await websocket.send_text(error_msg)
-                    # Close the WebSocket connection after sending the error message
-                    await websocket.close()
-            elif request.provider == "openai":
-                try:
-                    # Get the response and handle it properly using the previously created api_kwargs
-                    logger.info("Making Openai API call")
-                    response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                    # Handle streaming response from Openai
-                    async for chunk in response:
-                        choices = getattr(chunk, "choices", [])
-                        if len(choices) > 0:
-                            delta = getattr(choices[0], "delta", None)
-                            if delta is not None:
-                                text = getattr(delta, "content", None)
-                                if text is not None:
-                                    await websocket.send_text(text)
-                    # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
-                except Exception as e_openai:
-                    logger.error(f"Error with Openai API: {str(e_openai)}")
-                    error_msg = f"\nError with Openai API: {str(e_openai)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
-                    await websocket.send_text(error_msg)
-                    # Close the WebSocket connection after sending the error message
-                    await websocket.close()
             elif request.provider == "bedrock":
                 try:
                     logger.info("Making AWS Bedrock API call")
@@ -737,52 +630,6 @@ This file contains...
                     )
                     await websocket.send_text(error_msg)
                     await websocket.close()
-            elif request.provider == "azure":
-                try:
-                    # Get the response and handle it properly using the previously created api_kwargs
-                    logger.info("Making Azure AI API call")
-                    response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                    # Handle streaming response from Azure AI
-                    async for chunk in response:
-                        choices = getattr(chunk, "choices", [])
-                        if len(choices) > 0:
-                            delta = getattr(choices[0], "delta", None)
-                            if delta is not None:
-                                text = getattr(delta, "content", None)
-                                if text is not None:
-                                    await websocket.send_text(text)
-                    # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
-                except Exception as e_azure:
-                    logger.error(f"Error with Azure AI API: {str(e_azure)}")
-                    error_msg = f"\nError with Azure AI API: {str(e_azure)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                    await websocket.send_text(error_msg)
-                    # Close the WebSocket connection after sending the error message
-                    await websocket.close()
-            elif request.provider == "dashscope":
-                try:
-                    # Get the response and handle it properly using the previously created api_kwargs
-                    logger.info("Making Dashscope API call")
-                    response = await model.acall(
-                        api_kwargs=api_kwargs, model_type=ModelType.LLM
-                    )
-                    # DashscopeClient.acall with stream=True returns an async
-                    # generator of plain text chunks
-                    async for text in response:
-                        if text:
-                            await websocket.send_text(text)
-                    # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
-                except Exception as e_dashscope:
-                    logger.error(f"Error with Dashscope API: {str(e_dashscope)}")
-                    error_msg = (
-                        f"\nError with Dashscope API: {str(e_dashscope)}\n\n"
-                        "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
-                        "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
-                    )
-                    await websocket.send_text(error_msg)
-                    # Close the WebSocket connection after sending the error message
-                    await websocket.close()
             else:
                 # Google Generative AI (default provider)
                 response = model.generate_content(prompt, stream=True)
@@ -795,192 +642,56 @@ This file contains...
             logger.error(f"Error in streaming response: {str(e_outer)}")
             error_message = str(e_outer)
 
-            # Check for token limit errors
+            # Token limit fallback only applies to non-tool providers
+            # (tool-capable providers handle errors inside the agent loop)
             if "maximum context length" in error_message or "token limit" in error_message or "too many tokens" in error_message:
-                # If we hit a token limit error, try again without context
                 logger.warning("Token limit exceeded, retrying without context")
                 try:
-                    # Create a simplified prompt without context
                     simplified_prompt = f"/no_think {system_prompt}\n\n"
                     if conversation_history:
                         simplified_prompt += f"<conversation_history>\n{conversation_history}</conversation_history>\n\n"
-
-                    # Include file content in the fallback prompt if it was retrieved
                     if request.filePath and file_content:
                         simplified_prompt += f"<currentFileContent path=\"{request.filePath}\">\n{file_content}\n</currentFileContent>\n\n"
-
                     simplified_prompt += "<note>Answering without retrieval augmentation due to input size constraints.</note>\n\n"
                     simplified_prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 
                     if request.provider == "ollama":
                         simplified_prompt += " /no_think"
-
-                        # Create new api_kwargs with the simplified prompt
                         fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                            input=simplified_prompt,
-                            model_kwargs=model_kwargs,
-                            model_type=ModelType.LLM
+                            input=simplified_prompt, model_kwargs=model_kwargs, model_type=ModelType.LLM
                         )
-
-                        # Get the response using the simplified prompt
                         fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                        # Handle streaming fallback_response from Ollama
                         async for chunk in fallback_response:
                             text = getattr(chunk, 'response', None) or getattr(chunk, 'text', None) or str(chunk)
                             if text and not text.startswith('model=') and not text.startswith('created_at='):
                                 text = text.replace('<think>', '').replace('</think>', '')
                                 await websocket.send_text(text)
-                    elif request.provider == "openrouter":
-                        try:
-                            # Create new api_kwargs with the simplified prompt
-                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM
-                            )
-
-                            # Get the response using the simplified prompt
-                            logger.info("Making fallback OpenRouter API call")
-                            fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                            # Handle streaming fallback_response from OpenRouter
-                            async for chunk in fallback_response:
-                                await websocket.send_text(chunk)
-                        except Exception as e_fallback:
-                            logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
-                            error_msg = f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                            await websocket.send_text(error_msg)
-                    elif request.provider == "openai":
-                        try:
-                            # Create new api_kwargs with the simplified prompt
-                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM
-                            )
-
-                            # Get the response using the simplified prompt
-                            logger.info("Making fallback Openai API call")
-                            fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                            # Handle streaming fallback_response from Openai
-                            async for chunk in fallback_response:
-                                text = chunk if isinstance(chunk, str) else getattr(chunk, 'text', str(chunk))
-                                await websocket.send_text(text)
-                        except Exception as e_fallback:
-                            logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
-                            error_msg = f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
-                            await websocket.send_text(error_msg)
                     elif request.provider == "bedrock":
-                        try:
-                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM,
-                            )
-
-                            logger.info("Making fallback AWS Bedrock API call")
-                            fallback_response = await model.acall(
-                                api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM
-                            )
-
-                            if isinstance(fallback_response, str):
-                                await websocket.send_text(fallback_response)
-                            else:
-                                await websocket.send_text(str(fallback_response))
-                        except Exception as e_fallback:
-                            logger.error(
-                                f"Error with AWS Bedrock API fallback: {str(e_fallback)}"
-                            )
-                            error_msg = (
-                                f"\nError with AWS Bedrock API fallback: {str(e_fallback)}\n\n"
-                                "Please check that you have set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
-                                "environment variables with valid credentials."
-                            )
-                            await websocket.send_text(error_msg)
-                    elif request.provider == "azure":
-                        try:
-                            # Create new api_kwargs with the simplified prompt
-                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM
-                            )
-
-                            # Get the response using the simplified prompt
-                            logger.info("Making fallback Azure AI API call")
-                            fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                            # Handle streaming fallback response from Azure AI
-                            async for chunk in fallback_response:
-                                choices = getattr(chunk, "choices", [])
-                                if len(choices) > 0:
-                                    delta = getattr(choices[0], "delta", None)
-                                    if delta is not None:
-                                        text = getattr(delta, "content", None)
-                                        if text is not None:
-                                            await websocket.send_text(text)
-                        except Exception as e_fallback:
-                            logger.error(f"Error with Azure AI API fallback: {str(e_fallback)}")
-                            error_msg = f"\nError with Azure AI API fallback: {str(e_fallback)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                            await websocket.send_text(error_msg)
-                    elif request.provider == "dashscope":
-                        try:
-                            # Create new api_kwargs with the simplified prompt
-                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM,
-                            )
-
-                            logger.info("Making fallback Dashscope API call")
-                            fallback_response = await model.acall(
-                                api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM
-                            )
-
-                            # DashscopeClient.acall (stream=True) returns an async
-                            # generator of text chunks
-                            async for text in fallback_response:
-                                if text:
-                                    await websocket.send_text(text)
-                        except Exception as e_fallback:
-                            logger.error(
-                                f"Error with Dashscope API fallback: {str(e_fallback)}"
-                            )
-                            error_msg = (
-                                f"\nError with Dashscope API fallback: {str(e_fallback)}\n\n"
-                                "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
-                                "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
-                            )
-                            await websocket.send_text(error_msg)
+                        fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
+                            input=simplified_prompt, model_kwargs=model_kwargs, model_type=ModelType.LLM
+                        )
+                        fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
+                        await websocket.send_text(str(fallback_response) if not isinstance(fallback_response, str) else fallback_response)
                     else:
-                        # Google Generative AI fallback (default provider)
-                        model_config = get_model_config(request.provider, request.model)
+                        fb_config = get_model_config(request.provider, request.model)
                         fallback_model = genai.GenerativeModel(
-                            model_name=model_config["model_kwargs"]["model"],
+                            model_name=fb_config["model_kwargs"]["model"],
                             generation_config={
-                                "temperature": model_config["model_kwargs"].get("temperature", 0.7),
-                                "top_p": model_config["model_kwargs"].get("top_p", 0.8),
-                                "top_k": model_config["model_kwargs"].get("top_k", 40),
+                                "temperature": fb_config["model_kwargs"].get("temperature", 0.7),
+                                "top_p": fb_config["model_kwargs"].get("top_p", 0.8),
+                                "top_k": fb_config["model_kwargs"].get("top_k", 40),
                             },
                         )
-
-                        fallback_response = fallback_model.generate_content(
-                            simplified_prompt, stream=True
-                        )
+                        fallback_response = fallback_model.generate_content(simplified_prompt, stream=True)
                         for chunk in fallback_response:
                             if hasattr(chunk, "text"):
                                 await websocket.send_text(chunk.text)
                 except Exception as e2:
                     logger.error(f"Error in fallback streaming response: {str(e2)}")
-                    await websocket.send_text(f"\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts.")
-                    # Close the WebSocket connection after sending the error message
+                    await websocket.send_text("\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts.")
                     await websocket.close()
             else:
-                # For other errors, return the error message
                 await websocket.send_text(f"\nError: {error_message}")
-                # Close the WebSocket connection after sending the error message
                 await websocket.close()
 
     except WebSocketDisconnect:

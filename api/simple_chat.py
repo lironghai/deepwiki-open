@@ -26,6 +26,8 @@ from api.prompts import (
     DEEP_RESEARCH_INTERMEDIATE_ITERATION_PROMPT,
     SIMPLE_CHAT_SYSTEM_PROMPT
 )
+from api.tools.agent_tools import supports_tool_calling
+from api.tools.tool_call_handler import run_agent_loop
 
 # Configure logging
 from api.logging_config import setup_logging
@@ -325,15 +327,15 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             # Add file content to the prompt after conversation history
             prompt += f"<currentFileContent path=\"{request.filePath}\">\n{file_content}\n</currentFileContent>\n\n"
 
-        # Only include context if it's not empty
         CONTEXT_START = "<START_OF_CONTEXT>"
         CONTEXT_END = "<END_OF_CONTEXT>"
         if context_text.strip():
-            prompt += f"{CONTEXT_START}\n{context_text}\n{CONTEXT_END}\n\n"
+            prompt += f"{CONTEXT_START}\n"
+            prompt += "The following are ACTUAL code snippets retrieved from the repository. You MUST ONLY reference files and code that appear below. Do NOT invent or fabricate any file paths or code not shown here.\n"
+            prompt += f"{context_text}\n{CONTEXT_END}\n\n"
         else:
-            # Add a note that we're skipping RAG due to size constraints or because it's the isolated API
             logger.info("No context available from RAG")
-            prompt += "<note>Answering without retrieval augmentation.</note>\n\n"
+            prompt += "<note>No relevant code snippets were retrieved from the repository. You should inform the user that you cannot find relevant information in the repository context rather than guessing.</note>\n\n"
 
         prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 
@@ -473,92 +475,45 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         # Create a streaming response
         async def response_stream():
             try:
-                if request.provider == "ollama":
-                    # Get the response and handle it properly using the previously created api_kwargs
+                if supports_tool_calling(request.provider):
+                    # --- Agentic RAG: tool-calling loop for capable providers ---
+                    agent_model_kwargs = {
+                        "model": request.model or model_config.get("model"),
+                        "temperature": model_config.get("temperature", 0.7),
+                    }
+                    if "top_p" in model_config:
+                        agent_model_kwargs["top_p"] = model_config["top_p"]
+
+                    async for msg in run_agent_loop(
+                        provider=request.provider,
+                        model_client=model,
+                        model_kwargs=agent_model_kwargs,
+                        initial_prompt=prompt,
+                        rag_instance=request_rag,
+                        repo_path=getattr(request_rag, "repo_path", None),
+                    ):
+                        if msg.get("type") == "content":
+                            yield msg.get("delta", "")
+                        elif msg.get("type") == "error":
+                            yield f"\nError: {msg.get('message', 'Unknown error')}"
+                elif request.provider == "ollama":
                     response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                    # Handle streaming response from Ollama
                     async for chunk in response:
                         text = getattr(chunk, 'response', None) or getattr(chunk, 'text', None) or str(chunk)
                         if text and not text.startswith('model=') and not text.startswith('created_at='):
                             text = text.replace('<think>', '').replace('</think>', '')
                             yield text
-                elif request.provider == "openrouter":
-                    try:
-                        # Get the response and handle it properly using the previously created api_kwargs
-                        logger.info("Making OpenRouter API call")
-                        response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                        # Handle streaming response from OpenRouter
-                        async for chunk in response:
-                            yield chunk
-                    except Exception as e_openrouter:
-                        logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
-                        yield f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                elif request.provider == "openai":
-                    try:
-                        # Get the response and handle it properly using the previously created api_kwargs
-                        logger.info("Making Openai API call")
-                        response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                        # Handle streaming response from Openai
-                        async for chunk in response:
-                           choices = getattr(chunk, "choices", [])
-                           if len(choices) > 0:
-                               delta = getattr(choices[0], "delta", None)
-                               if delta is not None:
-                                    text = getattr(delta, "content", None)
-                                    if text is not None:
-                                        yield text
-                    except Exception as e_openai:
-                        logger.error(f"Error with Openai API: {str(e_openai)}")
-                        yield f"\nError with Openai API: {str(e_openai)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
                 elif request.provider == "bedrock":
                     try:
-                        # Get the response and handle it properly using the previously created api_kwargs
                         logger.info("Making AWS Bedrock API call")
                         response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                        # Handle response from Bedrock (not streaming yet)
                         if isinstance(response, str):
                             yield response
                         else:
-                            # Try to extract text from the response
                             yield str(response)
                     except Exception as e_bedrock:
                         logger.error(f"Error with AWS Bedrock API: {str(e_bedrock)}")
                         yield f"\nError with AWS Bedrock API: {str(e_bedrock)}\n\nPlease check that you have set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables with valid credentials."
-                elif request.provider == "azure":
-                    try:
-                        # Get the response and handle it properly using the previously created api_kwargs
-                        logger.info("Making Azure AI API call")
-                        response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
-                        # Handle streaming response from Azure AI
-                        async for chunk in response:
-                            choices = getattr(chunk, "choices", [])
-                            if len(choices) > 0:
-                                delta = getattr(choices[0], "delta", None)
-                                if delta is not None:
-                                    text = getattr(delta, "content", None)
-                                    if text is not None:
-                                        yield text
-                    except Exception as e_azure:
-                        logger.error(f"Error with Azure AI API: {str(e_azure)}")
-                        yield f"\nError with Azure AI API: {str(e_azure)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                elif request.provider == "dashscope":
-                    try:
-                        logger.info("Making Dashscope API call")
-                        response = await model.acall(
-                            api_kwargs=api_kwargs, model_type=ModelType.LLM
-                        )
-                        # DashscopeClient.acall with stream=True returns an async
-                        # generator of text chunks
-                        async for text in response:
-                            if text:
-                                yield text
-                    except Exception as e_dashscope:
-                        logger.error(f"Error with Dashscope API: {str(e_dashscope)}")
-                        yield (
-                            f"\nError with Dashscope API: {str(e_dashscope)}\n\n"
-                            "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
-                            "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
-                        )
                 else:
                     # Google Generative AI (default provider)
                     response = model.generate_content(prompt, stream=True)
@@ -570,179 +525,52 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 logger.error(f"Error in streaming response: {str(e_outer)}")
                 error_message = str(e_outer)
 
-                # Check for token limit errors
                 if "maximum context length" in error_message or "token limit" in error_message or "too many tokens" in error_message:
-                    # If we hit a token limit error, try again without context
                     logger.warning("Token limit exceeded, retrying without context")
                     try:
-                        # Create a simplified prompt without context
                         simplified_prompt = f"/no_think {system_prompt}\n\n"
                         if conversation_history:
                             simplified_prompt += f"<conversation_history>\n{conversation_history}</conversation_history>\n\n"
-
-                        # Include file content in the fallback prompt if it was retrieved
                         if request.filePath and file_content:
                             simplified_prompt += f"<currentFileContent path=\"{request.filePath}\">\n{file_content}\n</currentFileContent>\n\n"
-
                         simplified_prompt += "<note>Answering without retrieval augmentation due to input size constraints.</note>\n\n"
                         simplified_prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
 
                         if request.provider == "ollama":
                             simplified_prompt += " /no_think"
-
-                            # Create new api_kwargs with the simplified prompt
                             fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                input=simplified_prompt,
-                                model_kwargs=model_kwargs,
-                                model_type=ModelType.LLM
+                                input=simplified_prompt, model_kwargs=model_kwargs, model_type=ModelType.LLM
                             )
-
-                            # Get the response using the simplified prompt
                             fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                            # Handle streaming fallback_response from Ollama
                             async for chunk in fallback_response:
                                 text = getattr(chunk, 'response', None) or getattr(chunk, 'text', None) or str(chunk)
                                 if text and not text.startswith('model=') and not text.startswith('created_at='):
                                     text = text.replace('<think>', '').replace('</think>', '')
                                     yield text
-                        elif request.provider == "openrouter":
-                            try:
-                                # Create new api_kwargs with the simplified prompt
-                                fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                    input=simplified_prompt,
-                                    model_kwargs=model_kwargs,
-                                    model_type=ModelType.LLM
-                                )
-
-                                # Get the response using the simplified prompt
-                                logger.info("Making fallback OpenRouter API call")
-                                fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                                # Handle streaming fallback_response from OpenRouter
-                                async for chunk in fallback_response:
-                                    yield chunk
-                            except Exception as e_fallback:
-                                logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
-                                yield f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                        elif request.provider == "openai":
-                            try:
-                                # Create new api_kwargs with the simplified prompt
-                                fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                    input=simplified_prompt,
-                                    model_kwargs=model_kwargs,
-                                    model_type=ModelType.LLM
-                                )
-
-                                # Get the response using the simplified prompt
-                                logger.info("Making fallback Openai API call")
-                                fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                                # Handle streaming fallback_response from Openai
-                                async for chunk in fallback_response:
-                                    text = chunk if isinstance(chunk, str) else getattr(chunk, 'text', str(chunk))
-                                    yield text
-                            except Exception as e_fallback:
-                                logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
-                                yield f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
                         elif request.provider == "bedrock":
-                            try:
-                                # Create new api_kwargs with the simplified prompt
-                                fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                    input=simplified_prompt,
-                                    model_kwargs=model_kwargs,
-                                    model_type=ModelType.LLM
-                                )
-
-                                # Get the response using the simplified prompt
-                                logger.info("Making fallback AWS Bedrock API call")
-                                fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                                # Handle response from Bedrock
-                                if isinstance(fallback_response, str):
-                                    yield fallback_response
-                                else:
-                                    # Try to extract text from the response
-                                    yield str(fallback_response)
-                            except Exception as e_fallback:
-                                logger.error(f"Error with AWS Bedrock API fallback: {str(e_fallback)}")
-                                yield f"\nError with AWS Bedrock API fallback: {str(e_fallback)}\n\nPlease check that you have set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables with valid credentials."
-                        elif request.provider == "azure":
-                            try:
-                                # Create new api_kwargs with the simplified prompt
-                                fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                    input=simplified_prompt,
-                                    model_kwargs=model_kwargs,
-                                    model_type=ModelType.LLM
-                                )
-
-                                # Get the response using the simplified prompt
-                                logger.info("Making fallback Azure AI API call")
-                                fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
-
-                                # Handle streaming fallback response from Azure AI
-                                async for chunk in fallback_response:
-                                    choices = getattr(chunk, "choices", [])
-                                    if len(choices) > 0:
-                                        delta = getattr(choices[0], "delta", None)
-                                        if delta is not None:
-                                            text = getattr(delta, "content", None)
-                                            if text is not None:
-                                                yield text
-                            except Exception as e_fallback:
-                                logger.error(f"Error with Azure AI API fallback: {str(e_fallback)}")
-                                yield f"\nError with Azure AI API fallback: {str(e_fallback)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                        elif request.provider == "dashscope":
-                            try:
-                                # Create new api_kwargs with the simplified prompt
-                                fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
-                                    input=simplified_prompt,
-                                    model_kwargs=model_kwargs,
-                                    model_type=ModelType.LLM,
-                                )
-
-                                logger.info("Making fallback Dashscope API call")
-                                fallback_response = await model.acall(
-                                    api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM
-                                )
-
-                                # DashscopeClient.acall (stream=True) returns an async
-                                # generator of text chunks
-                                async for text in fallback_response:
-                                    if text:
-                                        yield text
-                            except Exception as e_fallback:
-                                logger.error(
-                                    f"Error with Dashscope API fallback: {str(e_fallback)}"
-                                )
-                                yield (
-                                    f"\nError with Dashscope API fallback: {str(e_fallback)}\n\n"
-                                    "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
-                                    "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
-                                )
+                            fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
+                                input=simplified_prompt, model_kwargs=model_kwargs, model_type=ModelType.LLM
+                            )
+                            fallback_response = await model.acall(api_kwargs=fallback_api_kwargs, model_type=ModelType.LLM)
+                            yield str(fallback_response) if not isinstance(fallback_response, str) else fallback_response
                         else:
-                            # Google Generative AI fallback (default provider)
-                            model_config = get_model_config(request.provider, request.model)
+                            fb_config = get_model_config(request.provider, request.model)
                             fallback_model = genai.GenerativeModel(
-                                model_name=model_config["model_kwargs"]["model"],
+                                model_name=fb_config["model_kwargs"]["model"],
                                 generation_config={
-                                    "temperature": model_config["model_kwargs"].get("temperature", 0.7),
-                                    "top_p": model_config["model_kwargs"].get("top_p", 0.8),
-                                    "top_k": model_config["model_kwargs"].get("top_k", 40),
+                                    "temperature": fb_config["model_kwargs"].get("temperature", 0.7),
+                                    "top_p": fb_config["model_kwargs"].get("top_p", 0.8),
+                                    "top_k": fb_config["model_kwargs"].get("top_k", 40),
                                 },
                             )
-
-                            fallback_response = fallback_model.generate_content(
-                                simplified_prompt, stream=True
-                            )
+                            fallback_response = fallback_model.generate_content(simplified_prompt, stream=True)
                             for chunk in fallback_response:
                                 if hasattr(chunk, "text"):
                                     yield chunk.text
                     except Exception as e2:
                         logger.error(f"Error in fallback streaming response: {str(e2)}")
-                        yield f"\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts."
+                        yield "\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts."
                 else:
-                    # For other errors, return the error message
                     yield f"\nError: {error_message}"
 
         # Return streaming response

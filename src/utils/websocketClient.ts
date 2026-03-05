@@ -49,47 +49,95 @@ export interface ChatCompletionRequest {
   excluded_files?: string;
 }
 
+export interface ToolCallInfo {
+  id: string;
+  name: string;
+  arguments: string;
+  status: 'calling' | 'done';
+  summary?: string;
+}
+
 /**
- * Creates a WebSocket connection for chat completions
- * @param request The chat completion request
- * @param onMessage Callback for received messages
- * @param onError Callback for errors
- * @param onClose Callback for when the connection closes
- * @returns The WebSocket connection
+ * Creates a WebSocket connection for chat completions.
+ *
+ * Supports both plain-text messages (backward compat) and structured JSON
+ * messages from the Agentic RAG tool-calling loop:
+ *   { type: "content",          delta: string }
+ *   { type: "tool_call_start",  id, name, arguments }
+ *   { type: "tool_call_result", id, name, summary }
+ *   { type: "error",           message: string }
  */
 export const createChatWebSocket = (
   request: ChatCompletionRequest,
   onMessage: (message: string) => void,
   onError: (error: Event) => void,
-  onClose: () => void
+  onClose: () => void,
+  onToolCall?: (data: ToolCallInfo) => void,
+  onToolResult?: (data: ToolCallInfo) => void,
 ): WebSocket => {
-  // Create WebSocket connection
   const wsUrl = getWebSocketUrl('/ws/chat');
   console.log('Connecting to WebSocket:', wsUrl);
   const ws = new WebSocket(wsUrl);
-  
-  // Set up event handlers
+
   ws.onopen = () => {
     console.log('WebSocket connection established');
-    // Send the request as JSON
     ws.send(JSON.stringify(request));
   };
-  
+
   ws.onmessage = (event) => {
-    // Call the message handler with the received text
-    onMessage(event.data);
+    const raw: string = event.data;
+    try {
+      const msg = JSON.parse(raw);
+      if (msg && typeof msg === 'object' && msg.type) {
+        switch (msg.type) {
+          case 'content':
+            onMessage(msg.delta ?? '');
+            break;
+          case 'tool_call_start':
+            if (onToolCall) {
+              onToolCall({
+                id: msg.id,
+                name: msg.name,
+                arguments: msg.arguments,
+                status: 'calling',
+              });
+            }
+            break;
+          case 'tool_call_result':
+            if (onToolResult) {
+              onToolResult({
+                id: msg.id,
+                name: msg.name,
+                arguments: '',
+                status: 'done',
+                summary: msg.summary,
+              });
+            }
+            break;
+          case 'error':
+            onMessage(`\nError: ${msg.message ?? 'Unknown error'}`);
+            break;
+          default:
+            onMessage(raw);
+        }
+        return;
+      }
+    } catch {
+      // Not JSON — fall through to plain-text handling
+    }
+    onMessage(raw);
   };
-  
+
   ws.onerror = (error) => {
     console.error('WebSocket error:', error);
     onError(error);
   };
-  
+
   ws.onclose = () => {
     console.log('WebSocket connection closed');
     onClose();
   };
-  
+
   return ws;
 };
 

@@ -145,8 +145,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RAGAnswer(adal.DataClass):
-    rationale: str = field(default="", metadata={"desc": "Chain of thoughts for the answer."})
-    answer: str = field(default="", metadata={"desc": "Answer to the user query, formatted in markdown for beautiful rendering with react-markdown. DO NOT include ``` triple backticks fences at the beginning or end of your answer."})
+    rationale: str = field(default="", metadata={"desc": "Chain of thoughts for the answer. Verify that every file path and code snippet you reference actually exists in the provided context."})
+    answer: str = field(default="", metadata={"desc": "Answer to the user query, formatted in markdown for beautiful rendering with react-markdown. DO NOT include ``` triple backticks fences at the beginning or end of your answer. ONLY reference files and code from the provided context - never fabricate file paths or code."})
 
     __output_fields__ = ["rationale", "answer"]
 

@@ -7,7 +7,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import RepoInfo from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import ModelSelectionModal from './ModelSelectionModal';
-import { createChatWebSocket, closeWebSocket, ChatCompletionRequest } from '@/utils/websocketClient';
+import { createChatWebSocket, closeWebSocket, ChatCompletionRequest, ToolCallInfo } from '@/utils/websocketClient';
 
 interface Model {
   id: string;
@@ -58,6 +58,7 @@ const Ask: React.FC<AskProps> = ({
   const [deepResearch, setDeepResearch] = useState(false);
   const [useCodemap, setUseCodemap] = useState(false);
   const [codemapReferencedNodes, setCodemapReferencedNodes] = useState<any[]>([]);
+  const [toolCalls, setToolCalls] = useState<ToolCallInfo[]>([]);
 
   // Model selection state
   const [selectedProvider, setSelectedProvider] = useState(provider);
@@ -153,6 +154,7 @@ const Ask: React.FC<AskProps> = ({
   const clearConversation = () => {
     setQuestion('');
     setResponse('');
+    setToolCalls([]);
     setConversationHistory([]);
     setResearchIteration(0);
     setResearchComplete(false);
@@ -394,7 +396,17 @@ const Ask: React.FC<AskProps> = ({
           }
 
           setIsLoading(false);
-        }
+        },
+        // Tool call handler
+        (tc: ToolCallInfo) => {
+          setToolCalls(prev => [...prev, tc]);
+        },
+        // Tool result handler
+        (tc: ToolCallInfo) => {
+          setToolCalls(prev =>
+            prev.map(t => (t.id === tc.id ? { ...t, status: 'done' as const, summary: tc.summary } : t))
+          );
+        },
       );
     } catch (error) {
       console.error('Error during API call:', error);
@@ -594,6 +606,7 @@ const Ask: React.FC<AskProps> = ({
 
     setIsLoading(true);
     setResponse('');
+    setToolCalls([]);
     setResearchIteration(0);
     setResearchComplete(false);
 
@@ -669,7 +682,17 @@ const Ask: React.FC<AskProps> = ({
           }
 
           setIsLoading(false);
-        }
+        },
+        // Tool call handler
+        (tc: ToolCallInfo) => {
+          setToolCalls(prev => [...prev, tc]);
+        },
+        // Tool result handler
+        (tc: ToolCallInfo) => {
+          setToolCalls(prev =>
+            prev.map(t => (t.id === tc.id ? { ...t, status: 'done' as const, summary: tc.summary } : t))
+          );
+        },
       );
     } catch (error) {
       console.error('Error during API call:', error);
@@ -821,9 +844,61 @@ const Ask: React.FC<AskProps> = ({
           </div>
         </form>
 
+        {/* Tool calls display */}
+        {toolCalls.length > 0 && (
+          <div className="border-t border-gray-200 dark:border-gray-700 mt-4 px-4 pt-3 pb-1">
+            <div className="space-y-1.5">
+              {toolCalls.map((tc) => (
+                <div
+                  key={tc.id}
+                  className="flex items-start gap-2 text-xs rounded-md px-2.5 py-1.5 bg-[var(--background)]/50 border border-[var(--border-color)]/30"
+                >
+                  <span className="mt-0.5 shrink-0">
+                    {tc.status === 'calling' ? (
+                      <svg className="animate-spin h-3.5 w-3.5 text-[var(--accent-primary)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="h-3.5 w-3.5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </span>
+                  <div className="min-w-0">
+                    <span className="font-medium text-[var(--foreground)]/80">
+                      {tc.name === 'rag_search' ? 'Semantic search' : tc.name === 'grep_search' ? 'Pattern search' : tc.name}
+                    </span>
+                    <span className="text-[var(--foreground)]/50 ml-1.5">
+                      {(() => {
+                        try {
+                          const args = JSON.parse(tc.arguments);
+                          return args.query || args.pattern || tc.arguments;
+                        } catch {
+                          return tc.arguments;
+                        }
+                      })()}
+                    </span>
+                    {tc.status === 'done' && tc.summary && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-[var(--foreground)]/40 hover:text-[var(--foreground)]/60 transition-colors">
+                          Show result
+                        </summary>
+                        <pre className="mt-1 text-[10px] leading-tight text-[var(--foreground)]/50 whitespace-pre-wrap break-all max-h-24 overflow-y-auto">
+                          {tc.summary}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Response area */}
         {response && (
-          <div className="border-t border-gray-200 dark:border-gray-700 mt-4">
+          <div className={`border-t border-gray-200 dark:border-gray-700 ${toolCalls.length === 0 ? 'mt-4' : ''}`}>
             <div
               ref={responseRef}
               className="p-4 max-h-[500px] overflow-y-auto"
