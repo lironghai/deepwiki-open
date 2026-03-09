@@ -231,3 +231,88 @@ def _python_grep(
             continue
 
     return "\n".join(results) if results else "No matches found."
+
+
+# ---------------------------------------------------------------------------
+# Hybrid retrieval: grep from user query (for pre-prompt context)
+# ---------------------------------------------------------------------------
+
+# Max lines to include from grep in initial context
+GREP_PREPROMPT_MAX_RESULTS = 30
+
+
+def _grep_pattern_from_query(query: str) -> Optional[str]:
+    """Derive a safe grep pattern from user query (identifier or escaped prefix)."""
+    if not query or not query.strip():
+        return None
+    q = query.strip()
+    # Prefer code-like identifiers (e.g. RAG, prepare_retriever, get_model_config)
+    identifiers = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{1,}", q)
+    if identifiers:
+        # Use longest identifier to be more specific
+        return max(identifiers, key=len)
+    # Fallback: escaped prefix of query (e.g. for "how does X work")
+    prefix = q[:80].strip()
+    return re.escape(prefix) if prefix else None
+
+
+def grep_for_query(
+    query: str,
+    repo_path: Optional[str],
+    max_results: int = GREP_PREPROMPT_MAX_RESULTS,
+) -> str:
+    """
+    Run grep on the repo using a pattern derived from the user query.
+    Returns raw output (path:line_num:content per line) or 'No matches found.' / error string.
+    """
+    pattern = _grep_pattern_from_query(query)
+    if not pattern:
+        return "No matches found."
+    if not repo_path or not os.path.exists(repo_path):
+        return "No matches found."
+    args = {"pattern": pattern, "file_glob": "*", "max_results": max_results}
+    return _execute_grep_search(args, repo_path)
+
+
+def format_grep_context_for_prompt(raw_grep_output: str) -> str:
+    """
+    Turn raw grep output (path:line_num:content per line) into a block for context_text:
+    ## Keyword matches (grep)
+    ## File Path: <path>
+      line_num: content
+    ...
+    Returns empty string if no matches or on parse error.
+    """
+    if not raw_grep_output or "No matches" in raw_grep_output or raw_grep_output.strip().startswith("Error"):
+        return ""
+    by_file: Dict[str, List[str]] = {}
+    for line in raw_grep_output.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Format: path:line_num:content (content may contain ':')
+        # Prefer left split so content with colons is preserved
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[1].strip().isdigit():
+            file_path, line_num, content = parts[0], parts[1].strip(), parts[2]
+        else:
+            # Windows path with colon: path is C:\...; split from right
+            rest = line.rsplit(":", 1)
+            if len(rest) != 2:
+                continue
+            path_plus_ln, content = rest[0], rest[1]
+            pair = path_plus_ln.rsplit(":", 1)
+            if len(pair) != 2 or not pair[1].strip().isdigit():
+                continue
+            file_path, line_num = pair[0], pair[1].strip()
+        if file_path not in by_file:
+            by_file[file_path] = []
+        by_file[file_path].append(f"  {line_num}: {content}")
+    if not by_file:
+        return ""
+    parts = ["## Keyword matches (grep)\n"]
+    for file_path in sorted(by_file.keys()):
+        parts.append(f"## File Path: {file_path}\n")
+        parts.append("\n".join(by_file[file_path]))
+        parts.append("\n")
+    return "\n".join(parts).strip()

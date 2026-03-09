@@ -6,7 +6,7 @@
       "base_url": "${OPENAI_BASE_URL}"
     },
     "batch_size": 500,
-    "max_batch_size": 10,
+    "max_batch_size": 5,
     "rpm": 1600,
     "tpm": 1100000,
     "model_kwargs": {

@@ -398,8 +398,9 @@ class ParallelWikiGenerator:
             prompt += "\n"
 
         prompt += "## Instructions\n"
-        prompt += "Generate comprehensive wiki page content in Markdown format.\n"
-        prompt += "Include code examples, explanations, and relevant details.\n"
+        prompt += "Generate wiki page content in Markdown format based ONLY on the information above.\n"
+        prompt += "- Include code examples or explanations ONLY when they are implied or stated in the Relevant Code Modules / Architecture Context above. Do NOT invent APIs, methods, or file paths not mentioned.\n"
+        prompt += "- Do NOT add recommendations, suggestions, or inferred content (e.g. avoid 'consider', 'it is recommended', 'typically'). If information is missing, omit that section or state that it is not documented in the provided context.\n"
 
         return prompt
 
@@ -414,7 +415,9 @@ class ParallelWikiGenerator:
             prompt += f"## Description\n{description}\n\n"
 
         prompt += "## Instructions\n"
-        prompt += "Generate wiki page content in Markdown format.\n"
+        prompt += "Generate wiki page content in Markdown format based ONLY on the title and description above.\n"
+        prompt += "- Do NOT invent file paths, APIs, or code. If you do not have concrete context, keep the page short and factual.\n"
+        prompt += "- Do NOT add recommendations or speculative content.\n"
 
         return prompt
 

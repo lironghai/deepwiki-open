@@ -543,19 +543,18 @@ ${codemapSummary.dependencies
 
 You will be given:
 1. The "[WIKI_PAGE_TOPIC]" for the page you need to create.
-2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 10 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
+2. A list of "[RELEVANT_SOURCE_FILES]" (file paths) that are relevant to this page. The RETRIEVED CONTEXT below may contain excerpts from some of these files (or related code). You MUST base your content ONLY on what actually appears in that retrieved context. Do NOT assume you have "full content" of any file unless it is present in the context.
 
 CRITICAL STARTING INSTRUCTION:
-The very first thing on the page MUST be a \`<details>\` block listing ALL the \`[RELEVANT_SOURCE_FILES]\` you used to generate the content. There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include.
+The very first thing on the page MUST be a \`<details>\` block listing only the source files that you actually used from the RETRIEVED CONTEXT. List ONLY files that appear in the context provided to you (e.g. under "File Path:" in the context). Do NOT list or cite files that are not present in the context.
 Format it exactly like this:
 <details>
-<summary>Relevant source files</summary>
+<summary>Source files used (from retrieved context)</summary>
 
 Remember, do not provide any acknowledgements, disclaimers, apologies, or any other preface before the \`<details>\` block. JUST START with the \`<details>\` block.
-The following files were used as context for generating this wiki page:
+Files that appear in the retrieved context and were used for this page:
 
 ${filePaths.map(path => `- [${path}](${generateFileUrl(path)})`).join('\n')}
-<!-- Add additional relevant files if fewer than 5 were provided -->
 </details>
 
 Immediately after the \`<details>\` block, the main title of the page should be a H1 Markdown heading: \`# ${page.title}\`.
@@ -643,15 +642,16 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
     *   Include short, relevant code snippets (e.g., Python, Java, JavaScript, SQL, JSON, YAML) directly from the \`[RELEVANT_SOURCE_FILES]\` to illustrate key implementation details, data structures, or configurations.
     *   Ensure snippets are well-formatted within Markdown code blocks with appropriate language identifiers.
 
-6.  **Source Citations (EXTREMELY IMPORTANT):**
-    *   For EVERY piece of significant information, explanation, diagram, table entry, or code snippet, you MUST cite the specific source file(s) and relevant line numbers from which the information was derived.
-    *   Place citations at the end of the paragraph, under the diagram/table, or after the code snippet.
-    *   Use the exact format: \`Sources: [filename.ext:start_line-end_line]()\` for a range, or \`Sources: [filename.ext:line_number]()\` for a single line. Multiple files can be cited: \`Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()\` (if the whole file is relevant and line numbers are not applicable or too broad).
-    *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.
-    *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.
-    *   **CRITICAL**: NEVER include source citations (like \`Sources: [file.ext]()\`) INSIDE Mermaid diagram code blocks. Source citations should ONLY appear in regular Markdown text, NOT within \`\`\`mermaid code blocks. Including citations in Mermaid diagrams will cause parsing errors.
+6.  **Source Citations:**
+    *   Cite ONLY source files and line numbers that actually appear in the RETRIEVED CONTEXT. Do not invent or assume file names or line numbers.
+    *   Use the format \`Sources: [filename.ext:line_number]()\` or \`Sources: [filename.ext:start_line-end_line]()\` only when that file (and optionally lines) are present in the context.
+    *   **CRITICAL**: NEVER include source citations INSIDE Mermaid diagram code blocks. Source citations should ONLY appear in regular Markdown text, NOT within \`\`\`mermaid code blocks.
 
-7.  **Technical Accuracy:** All information must be derived SOLELY from the \`[RELEVANT_SOURCE_FILES]\`. Do not infer, invent, or use external knowledge about similar systems or common practices unless it's directly supported by the provided code. If information is not present in the provided files, do not include it or explicitly state its absence if crucial to the topic.
+7.  **Technical Accuracy and ANTI-HALLUCINATION (MANDATORY):**
+    *   All information MUST be derived SOLELY from the code and text that appears in the RETRIEVED CONTEXT (the content provided to you below). You do NOT have access to any file content that is not explicitly shown in that context.
+    *   Do NOT infer, invent, suggest, or use external knowledge. Do NOT write "it is recommended", "consider", "typically", "usually", or similar speculative or advisory language. Do NOT document APIs, methods, or behaviors that are not explicitly present in the provided context.
+    *   If the retrieved context does not contain enough information for a section (e.g., no implementation details, no API, no specific code): either omit that section or write exactly: "Not documented in the provided source files." Do NOT fill gaps with guesses or best practices.
+    *   Only cite file paths and code that appear in the provided context. Do NOT invent file paths, function names, class names, or line numbers.
 
 8.  **Clarity and Conciseness:** Use clear, professional, and concise technical language suitable for other developers working on or learning about the project. Avoid unnecessary jargon, but use correct technical terms where appropriate.
 
@@ -670,9 +670,9 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
             'English'} language.
 
 Remember:
-- Ground every claim in the provided source files.
-- Prioritize accuracy and direct representation of the code's functionality and structure.
-- Structure the document logically for easy understanding by other developers.
+- Ground EVERY claim in the RETRIEVED CONTEXT you are given. You only have access to what is in that context, not to "the full content of these files" unless that content was actually retrieved and included.
+- If context is missing or sparse for this page, produce a SHORT page that only describes what is actually present; do not pad with recommendations or inferred content.
+- Prioritize accuracy over completeness. Structure the document logically for other developers.
 `;
 
         // Prepare request body
@@ -1311,20 +1311,19 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
 CRITICAL RULES - MUST FOLLOW:
-1. Create ${isComprehensiveView ? '12-16' : '6-8'} pages that would make a ${isComprehensiveView ? 'DEEPLY TECHNICAL and comprehensive' : 'concise but technical'} wiki for this repository
-2. Each page should provide DEEP TECHNICAL COVERAGE including:
+1. Create ${isComprehensiveView ? '12-16' : '6-8'} pages that would make a ${isComprehensiveView ? 'DEEPLY TECHNICAL and comprehensive' : 'concise but technical'} wiki for this repository.
+2. Base page titles and descriptions ONLY on what you can infer from the provided <file_tree>, <readme>, and (if present) code architecture overview. Do not invent features, modules, or APIs that are not suggested by this material.
+3. Each page should provide DEEP TECHNICAL COVERAGE including (only for content that exists in the repo):
    - Implementation details and algorithms
    - Design patterns and architectural decisions
    - Code-level analysis with examples
    - Performance characteristics
    - Error handling strategies
    - Testing approaches
-3. Pages should cover: Core Architecture, Data Models, API Design, Key Algorithms, State Management, Error Handling, Testing Strategy, Configuration, Deployment, Security (if applicable)
-4. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths that are not explicitly listed in the file tree.
-5. Each page should reference AT LEAST 8-10 source files for comprehensive technical coverage
-4. If the repository has very few files (e.g., only README.md), create fewer pages accordingly. DO NOT create pages that reference non-existent files.
-5. Before adding any <file_path>, verify it exists in the <file_tree> above. Common files like .gitignore, package.json, tsconfig.json, etc. should ONLY be included if they are ACTUALLY in the file tree.
-6. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
+4. Pages should cover topics suggested by the file tree and README (e.g. Core Architecture, Data Models, API Design, etc.) but ONLY create pages for which you can point to real files in the <file_tree>.
+5. **EXTREMELY IMPORTANT**: The <file_path> entries in relevant_files MUST ONLY contain files that ACTUALLY EXIST in the <file_tree> provided above. DO NOT invent, assume, or hallucinate file paths. Before adding any <file_path>, verify it exists in the <file_tree>.
+6. If the repository has very few files (e.g., only README.md), create fewer pages. DO NOT create pages that reference non-existent files.
+7. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters.`
         }]
       };
 

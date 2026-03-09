@@ -26,6 +26,7 @@ from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
 from api.rag import RAG
 from api.prompts import (
+    AGENTIC_AGENT_SYSTEM_PROMPT,
     DEEP_RESEARCH_FIRST_ITERATION_PROMPT,
     DEEP_RESEARCH_FINAL_ITERATION_PROMPT,
     DEEP_RESEARCH_INTERMEDIATE_ITERATION_PROMPT,
@@ -37,7 +38,11 @@ from api.logging_config import setup_logging
 
 # Import MermaidPreprocessor for response preprocessing
 from api.tools.mermaid_preprocessor import MermaidPreprocessor
-from api.tools.agent_tools import supports_tool_calling
+from api.tools.agent_tools import (
+    format_grep_context_for_prompt,
+    grep_for_query,
+    supports_tool_calling,
+)
 from api.tools.tool_call_handler import run_agent_loop
 
 setup_logging()
@@ -342,6 +347,21 @@ async def handle_websocket_chat(websocket: WebSocket):
                 logger.error(f"Error retrieving documents: {str(e)}")
                 context_text = ""
 
+        # Hybrid retrieval: append grep results (keyword matches) after vector context
+        repo_path = getattr(request_rag, "repo_path", None)
+        if query and repo_path:
+            try:
+                raw_grep = grep_for_query(query, repo_path)
+                grep_block = format_grep_context_for_prompt(raw_grep)
+                if grep_block:
+                    if context_text.strip():
+                        context_text = context_text + "\n\n" + "-" * 10 + "\n\n" + grep_block
+                    else:
+                        context_text = grep_block
+                    logger.info("Appended grep pre-prompt context to context_text")
+            except Exception as e_grep:
+                logger.debug("Pre-prompt grep skipped: %s", e_grep)
+
         # Get repository information
         repo_url = request.repo_url
         repo_name = repo_url.split("/")[-1] if "/" in repo_url else repo_url
@@ -428,7 +448,7 @@ async def handle_websocket_chat(websocket: WebSocket):
             prompt += f"{context_text}\n{CONTEXT_END}\n\n"
         else:
             logger.info("No context available from RAG")
-            prompt += "<note>No relevant code snippets were retrieved from the repository. You should inform the user that you cannot find relevant information in the repository context rather than guessing.</note>\n\n"
+            prompt += "<note>No relevant code snippets were retrieved. Give a clear, fact-based reply: state that no code was retrieved (e.g. only README or empty), then give a direct conclusion (e.g. 不是/No) and the reason (e.g. 因为仓库中仅有 README 且无相关描述). Do NOT use uncertain phrasing like '无法确定' or 'cannot confirm'.</note>\n\n"
 
         # Inject codemap context if available (for code structure questions)
         if codemap_context.strip():
@@ -436,6 +456,25 @@ async def handle_websocket_chat(websocket: WebSocket):
             logger.info("Injected codemap context into prompt")
 
         prompt += f"<query>\n{query}\n</query>\n\nAssistant: "
+
+        # Devin-style: for tool-calling agents, high-level instructions only; user message without pre-filled context.
+        agent_instructions = None
+        agent_user_message = None
+        if supports_tool_calling(request.provider):
+            agent_instructions = AGENTIC_AGENT_SYSTEM_PROMPT.format(
+                repo_type=repo_type,
+                repo_url=repo_url,
+                repo_name=repo_name,
+                language_name=language_name,
+            )
+            agent_user_message = ""
+            if conversation_history:
+                agent_user_message += f"<conversation_history>\n{conversation_history}</conversation_history>\n\n"
+            if file_content:
+                agent_user_message += f"<currentFileContent path=\"{request.filePath}\">\n{file_content}\n</currentFileContent>\n\n"
+            if codemap_context.strip():
+                agent_user_message += f"<code_structure_context>\n{codemap_context}\n</code_structure_context>\n\n"
+            agent_user_message += f"<query>\n{query}\n</query>\n\nAssistant: "
 
         model_config = get_model_config(request.provider, request.model)["model_kwargs"]
 
@@ -588,9 +627,10 @@ async def handle_websocket_chat(websocket: WebSocket):
                         provider=request.provider,
                         model_client=model,
                         model_kwargs=agent_model_kwargs,
-                        initial_prompt=prompt,
+                        initial_prompt=agent_user_message if agent_user_message is not None else prompt,
                         rag_instance=request_rag,
                         repo_path=getattr(request_rag, "repo_path", None),
+                        system_instructions=agent_instructions,
                     ):
                         msg_type = msg.get("type")
                         if msg_type == "content":

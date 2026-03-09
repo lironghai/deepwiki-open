@@ -1,9 +1,10 @@
 """
 Tool call handler for Agentic RAG.
 
-Manages the agent loop: LLM call (streaming) -> detect tool_calls -> execute tools ->
-inject results -> call LLM again.  Yields structured messages that callers
-(WebSocket / HTTP) can forward to the frontend. Content is streamed chunk-by-chunk.
+When openai-agents SDK is available and provider is OpenAI-compatible, uses
+Runner.run_streamed (SDK owns the loop). Otherwise uses the hand-written
+for-loop (run_agent_loop_for_loop_backup). Yields structured messages that
+callers (WebSocket / HTTP) can forward to the frontend.
 """
 
 import json
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 MAX_AGENT_ITERATIONS = 10
 
+# Providers that expose AsyncOpenAI-like client (SDK can use OpenAIChatCompletionsModel).
+SDK_COMPATIBLE_PROVIDERS = ("openai", "azure", "dashscope")
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -31,17 +35,189 @@ async def run_agent_loop(
     rag_instance: Any,
     repo_path: Optional[str],
     max_iterations: int = MAX_AGENT_ITERATIONS,
+    system_instructions: Optional[str] = None,
 ) -> AsyncGenerator[Dict, None]:
     """
-    Async generator that drives the agentic tool-calling loop with streaming.
+    Drives the agentic tool-calling loop with streaming. Prefers the Agent SDK
+    when available and provider is SDK-compatible; otherwise uses the for-loop backup.
 
-    Yields dicts with the following shapes:
-        {"type": "content",           "delta": str}   (streamed)
-        {"type": "tool_call_start",   "id": str, "name": str, "arguments": str}
-        {"type": "tool_call_result",  "id": str, "name": str, "summary": str}
-        {"type": "error",             "message": str}
+    Yields dicts:
+        {"type": "content", "delta": str}
+        {"type": "tool_call_start", "id": str, "name": str, "arguments": str}
+        {"type": "tool_call_result", "id": str, "name": str, "summary": str}
+        {"type": "error", "message": str}
     """
-    messages: List[Dict] = [{"role": "user", "content": initial_prompt}]
+    if provider in SDK_COMPATIBLE_PROVIDERS:
+        try:
+            async for msg in _run_agent_loop_sdk(
+                model_client=model_client,
+                model_kwargs=model_kwargs,
+                initial_prompt=initial_prompt,
+                system_instructions=system_instructions,
+                rag_instance=rag_instance,
+                repo_path=repo_path,
+                max_iterations=max_iterations,
+            ):
+                yield msg
+            return
+        except Exception as e:
+            logger.warning("Agent SDK run failed, falling back to for-loop: %s", e)
+
+    async for msg in run_agent_loop_for_loop_backup(
+        provider=provider,
+        model_client=model_client,
+        model_kwargs=model_kwargs,
+        initial_prompt=initial_prompt,
+        rag_instance=rag_instance,
+        repo_path=repo_path,
+        max_iterations=max_iterations,
+        system_instructions=system_instructions,
+    ):
+        yield msg
+
+
+async def _run_agent_loop_sdk(
+    model_client: Any,
+    model_kwargs: Dict,
+    initial_prompt: str,
+    system_instructions: Optional[str],
+    rag_instance: Any,
+    repo_path: Optional[str],
+    max_iterations: int,
+) -> AsyncGenerator[Dict, None]:
+    """Use openai-agents Runner.run_streamed; map stream events to our yield format."""
+    try:
+        from agents import (
+            Agent,
+            ModelSettings,
+            OpenAIChatCompletionsModel,
+            RunConfig,
+            Runner,
+            function_tool,
+        )
+    except ImportError:
+        raise RuntimeError("openai-agents not installed")
+
+    try:
+        from agents import set_tracing_disabled
+        set_tracing_disabled(True)
+    except Exception:
+        pass
+
+    if model_client.async_client is None:
+        model_client.async_client = model_client.init_async_client()
+
+    model_name = model_kwargs.get("model")
+    instructions = system_instructions if system_instructions else initial_prompt
+    user_input = initial_prompt
+
+    @function_tool
+    def rag_search(query: str, top_k: int = 5) -> str:
+        """Search the repository codebase using semantic similarity. Use when you need more context about concepts, classes, functions, or features."""
+        return execute_tool(
+            "rag_search",
+            json.dumps({"query": query, "top_k": top_k}),
+            rag_instance,
+            repo_path,
+        )
+
+    @function_tool
+    def grep_search(
+        pattern: str,
+        file_glob: str = "*",
+        max_results: int = 20,
+    ) -> str:
+        """Search for exact text patterns in the repository using regex. Use when you need specific strings, function/class/variable names, imports, or config values."""
+        return execute_tool(
+            "grep_search",
+            json.dumps({"pattern": pattern, "file_glob": file_glob, "max_results": max_results}),
+            rag_instance,
+            repo_path,
+        )
+
+    sdk_model = OpenAIChatCompletionsModel(
+        openai_client=model_client.async_client,
+        model=model_name,
+    )
+    model_settings_kw: Dict[str, Any] = {"temperature": model_kwargs.get("temperature", 0.7)}
+    if "top_p" in model_kwargs:
+        model_settings_kw["top_p"] = model_kwargs["top_p"]
+    model_settings = ModelSettings(**model_settings_kw)
+
+    agent = Agent(
+        name="CodeAnalyst",
+        instructions=instructions,
+        tools=[rag_search, grep_search],
+        model=sdk_model,
+    )
+    run_config = RunConfig(model_settings=model_settings)
+
+    result = Runner.run_streamed(
+        agent,
+        input=user_input,
+        run_config=run_config,
+        max_turns=max_iterations,
+    )
+
+    try:
+        from openai.types.responses import ResponseTextDeltaEvent
+    except ImportError:
+        ResponseTextDeltaEvent = None
+
+    async for event in result.stream_events():
+        if event.type == "raw_response_event" and ResponseTextDeltaEvent is not None:
+            if isinstance(event.data, ResponseTextDeltaEvent) and getattr(event.data, "delta", None):
+
+                logger.info(f"Agent loop iteration content: {event.data}")
+
+                yield {"type": "content", "delta": event.data.delta}
+        elif event.type == "run_item_stream_event" and hasattr(event, "item"):
+            item = event.item
+            itype = getattr(item, "type", None)
+            if itype == "tool_call_item":
+                tool_call_start = {
+                    "type": "tool_call_start",
+                    "id": getattr(item, "call_id", "") or getattr(item, "id", ""),
+                    "name": getattr(item, "name", ""),
+                    "arguments": getattr(item, "arguments", "") or json.dumps(getattr(item, "input", {})),
+                };
+                logger.info(f"Agent loop iteration tool_call_start: {tool_call_start}")
+            elif itype == "tool_call_output_item":
+                out = getattr(item, "output", "") or getattr(item, "result", "")
+                if len(out) > 8000:
+                    out = out[:8000] + "\n\n... (truncated)"
+                summary = out[:200] + "..." if len(out) > 200 else out
+                tool_call_result = {
+                    "type": "tool_call_result",
+                    "id": getattr(item, "call_id", "") or getattr(item, "id", ""),
+                    "name": getattr(item, "name", ""),
+                    "summary": summary,
+                }
+                logger.info(f"Agent loop iteration tool_call_result: {tool_call_result}")
+
+
+
+async def run_agent_loop_for_loop_backup(
+    provider: str,
+    model_client: Any,
+    model_kwargs: Dict,
+    initial_prompt: str,
+    rag_instance: Any,
+    repo_path: Optional[str],
+    max_iterations: int = MAX_AGENT_ITERATIONS,
+    system_instructions: Optional[str] = None,
+) -> AsyncGenerator[Dict, None]:
+    """
+    Hand-written agent loop (LLM -> tool_calls -> execute -> LLM). Used when SDK
+    is unavailable or provider is not SDK-compatible. Yields same shapes as run_agent_loop.
+    """
+    if system_instructions:
+        messages: List[Dict] = [
+            {"role": "system", "content": system_instructions},
+            {"role": "user", "content": initial_prompt},
+        ]
+    else:
+        messages = [{"role": "user", "content": initial_prompt}]
 
     for iteration in range(max_iterations):
         logger.info(f"Agent loop iteration {iteration + 1}/{max_iterations}")
@@ -94,12 +270,13 @@ async def run_agent_loop(
             tc_name = tc.get("function", {}).get("name", "")
             tc_args = tc.get("function", {}).get("arguments", "{}")
 
-            yield {
+            tool_call_start = {
                 "type": "tool_call_start",
                 "id": tc_id,
                 "name": tc_name,
                 "arguments": tc_args,
             }
+            logger.info(f"Agent loop iteration tool_call_start: {tool_call_start}")
 
             result = execute_tool(tc_name, tc_args, rag_instance, repo_path)
 

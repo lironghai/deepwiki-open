@@ -549,7 +549,7 @@ async def perform_rag_query(
         prompt += "The following are ACTUAL code snippets retrieved from the repository. You MUST ONLY reference files and code that appear below. Do NOT invent or fabricate any file paths or code not shown here.\n"
         prompt += f"{context_text}\n<END_OF_CONTEXT>\n\n"
     else:
-        prompt += "<note>No relevant code snippets were retrieved from the repository. You should inform the user that you cannot find relevant information in the repository context rather than guessing.</note>\n\n"
+        prompt += "<note>No relevant code snippets were retrieved. Give a clear, fact-based reply: state that no code was retrieved (e.g. only README or empty), then give a direct conclusion (e.g. 不是/No) and the reason (e.g. 因为仓库中仅有 README 且无相关描述). Do NOT use uncertain phrasing like '无法确定' or 'cannot confirm'.</note>\n\n"
     
     prompt += f"<query>\n{question}\n</query>\n\nAssistant: "
     
