@@ -8,21 +8,287 @@ import tiktoken
 import logging
 import base64
 import glob
+import hashlib
+import ast
 from adalflow.utils import get_adalflow_default_root_path
 from adalflow.core.db import LocalDB
+from adalflow.core.component import DataComponent
 from api.config import configs, DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILES
 from api.ollama_patch import OllamaDocumentProcessor, RateLimitedEmbeddingProcessor
 from urllib.parse import urlparse, urlunparse, quote
 import requests
 from requests.exceptions import RequestException
+from typing import Dict, Any
 
 from api.tools.embedder import get_embedder
+from api.gitnexus_cli import run_gitnexus_analyze
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
+
+DEFAULT_SEMANTIC_INDEXING_CONFIG = {
+    "enabled": True,
+    "code_chunk_max_tokens": 1200,
+    "code_chunk_overlap_tokens": 120,
+    "summary": {
+        "enabled": False,
+        "max_code_chars": 2400,
+        "max_summary_chars": 320,
+    },
+}
+
+
+class LLMCodeSummarizer:
+    """Optional LLM summarizer for code chunks, with deterministic fallback."""
+
+    def __init__(self, summary_config: Dict[str, Any]):
+        self.summary_config = summary_config or {}
+        self.enabled = bool(self.summary_config.get("enabled", False))
+        self._cache: Dict[str, str] = {}
+        self._generator = None
+        self._generator_ready = False
+
+    def _init_generator(self):
+        if self._generator_ready:
+            return
+
+        self._generator_ready = True
+        if not self.enabled:
+            return
+
+        try:
+            from api.config import configs, get_model_config
+            # Align with wiki generation flow: use default provider's default model.
+            default_provider = configs.get("default_provider", "google")
+            providers = configs.get("providers", {})
+            if default_provider not in providers:
+                logger.warning(
+                    "Default provider '%s' not found in generator config, semantic summary falls back to heuristic.",
+                    default_provider,
+                )
+                self._generator = None
+                return
+
+            model_config = get_model_config(default_provider, None)
+
+            # Simple text-in / text-out generator
+            self._generator = adal.Generator(
+                template="{{prompt}}",
+                model_client=model_config["model_client"](),
+                model_kwargs=model_config["model_kwargs"],
+            )
+            logger.info(
+                "Semantic summary model initialized: provider=%s, model=%s",
+                default_provider,
+                model_config["model_kwargs"].get("model"),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize semantic summary LLM, fallback to heuristic summary: {e}")
+            self._generator = None
+
+    def summarize(self, code_text: str, file_path: str, chunk_meta: Dict[str, Any]) -> str:
+        text = code_text or ""
+        if not text.strip():
+            return "Empty code chunk."
+
+        cache_key = hashlib.md5(f"{file_path}:{text}".encode("utf-8")).hexdigest()
+        cached = self._cache.get(cache_key)
+        if cached:
+            return cached
+
+        self._init_generator()
+        summary = ""
+        if self._generator is not None:
+            summary = self._llm_summary(text, file_path)
+        if not summary:
+            summary = self._heuristic_summary(text, file_path, chunk_meta)
+
+        max_summary_chars = int(self.summary_config.get("max_summary_chars", 320))
+        summary = summary.strip()
+        if len(summary) > max_summary_chars:
+            summary = summary[:max_summary_chars].rstrip() + "..."
+
+        self._cache[cache_key] = summary
+        return summary
+
+    def _llm_summary(self, code_text: str, file_path: str) -> str:
+        try:
+            max_code_chars = int(self.summary_config.get("max_code_chars", 2400))
+            code_excerpt = code_text[:max_code_chars]
+            prompt = (
+                "You are generating a retrieval summary for source code embedding.\n"
+                "Return ONLY a concise summary in 3-5 bullet points, focusing on responsibilities, key APIs, data flow, and side effects.\n"
+                f"File: {file_path}\n\n"
+                "Code:\n"
+                f"{code_excerpt}"
+            )
+            output = self._generator(prompt_kwargs={"prompt": prompt})
+            if hasattr(output, "data") and output.data:
+                return str(output.data)
+            if hasattr(output, "raw_response") and output.raw_response:
+                return str(output.raw_response)
+            return str(output)
+        except Exception as e:
+            logger.warning(f"LLM summary generation failed for {file_path}, using fallback: {e}")
+            return ""
+
+    def _heuristic_summary(self, code_text: str, file_path: str, chunk_meta: Dict[str, Any]) -> str:
+        lines = [ln.strip() for ln in code_text.splitlines() if ln.strip()]
+        head = lines[:8]
+        signatures = []
+        for line in head:
+            if line.startswith(("def ", "class ", "async def ", "func ", "interface ", "type ")):
+                signatures.append(line[:120])
+        block_type = chunk_meta.get("block_type", "code")
+        if signatures:
+            joined = " | ".join(signatures[:3])
+            return f"{file_path} ({block_type}): {joined}"
+        return f"{file_path} ({block_type}): code implementation chunk with {len(lines)} non-empty lines."
+
+
+class MetadataAwareTextSplitter(DataComponent):
+    """Skip word-based splitter for docs that are already semantic chunks."""
+
+    def __init__(self, splitter: TextSplitter) -> None:
+        super().__init__()
+        self.splitter = splitter
+
+    def __call__(self, documents: List[Document]) -> List[Document]:
+        if not documents:
+            return documents
+
+        passthrough_docs = []
+        need_split_docs = []
+        for doc in documents:
+            if getattr(doc, "meta_data", {}).get("skip_text_split", False):
+                passthrough_docs.append(doc)
+            else:
+                need_split_docs.append(doc)
+
+        split_docs = self.splitter(need_split_docs) if need_split_docs else []
+        return passthrough_docs + split_docs
+
+
+def build_semantic_embedding_text(code_text: str, summary_text: str) -> str:
+    """Compose embedding input with both summary and raw code chunk."""
+    summary = (summary_text or "").strip()
+    code = (code_text or "").strip()
+    if not summary:
+        return code
+    return f"[Semantic Summary]\n{summary}\n\n[Code]\n{code}"
+
+
+class SimpleChunk:
+    def __init__(
+        self,
+        content: str,
+        chunk_index: int,
+        total_chunks: int,
+        start_line: int,
+        end_line: int,
+        metadata: Dict[str, Any],
+    ) -> None:
+        self.content = content
+        self.chunk_index = chunk_index
+        self.total_chunks = total_chunks
+        self.start_line = start_line
+        self.end_line = end_line
+        self.metadata = metadata
+
+
+def chunk_python_ast_first(
+    content: str,
+    relative_path: str,
+    count_tokens_fn,
+    max_tokens: int,
+    overlap_tokens: int,
+) -> List[SimpleChunk]:
+    """
+    Python代码优先按AST顶层节点切分；超大节点再用固定长度兜底分片。
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return []
+
+    try:
+        tree = ast.parse(content)
+    except Exception as e:
+        logger.warning(f"AST parse failed for {relative_path}, fallback to enhanced chunker: {e}")
+        return []
+
+    ast_nodes = [
+        n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    if not ast_nodes:
+        return []
+
+    header_end_line = max(1, ast_nodes[0].lineno - 1)
+    header_text = "".join(lines[:header_end_line])
+    header_tokens = count_tokens_fn(header_text)
+
+    from api.text_chunker_v2 import chunk_large_file_v2
+
+    chunks: List[SimpleChunk] = []
+    for node in ast_nodes:
+        node_start = int(getattr(node, "lineno", 1))
+        node_end = int(getattr(node, "end_lineno", node_start))
+        block_text = "".join(lines[node_start - 1:node_end])
+
+        combined_text = header_text + block_text
+        combined_tokens = count_tokens_fn(combined_text)
+        if combined_tokens <= max_tokens:
+            chunks.append(SimpleChunk(
+                content=combined_text,
+                chunk_index=0,
+                total_chunks=0,
+                start_line=1,
+                end_line=node_end,
+                metadata={"block_type": "python_ast_block", "has_header": True},
+            ))
+            continue
+
+        # 超大方法/类：使用增强分块器做固定长度兜底
+        sub_chunks = chunk_large_file_v2(
+            block_text,
+            f"{relative_path}::ast_block",
+            count_tokens_fn,
+            max_tokens=max(128, max_tokens - header_tokens),
+            overlap_tokens=overlap_tokens,
+        )
+        if not sub_chunks:
+            sub_chunks = [SimpleChunk(
+                content=block_text,
+                chunk_index=0,
+                total_chunks=1,
+                start_line=node_start,
+                end_line=node_end,
+                metadata={"block_type": "python_ast_fallback"},
+            )]
+
+        for sub in sub_chunks:
+            chunks.append(SimpleChunk(
+                content=header_text + sub.content,
+                chunk_index=0,
+                total_chunks=0,
+                start_line=1,
+                end_line=node_start - 1 + int(sub.end_line),
+                metadata={
+                    "block_type": "python_ast_block_fragment",
+                    "has_header": True,
+                    "is_partial_function": True,
+                },
+            ))
+
+    # 填充块索引
+    total = len(chunks)
+    for idx, chunk in enumerate(chunks):
+        chunk.chunk_index = idx
+        chunk.total_chunks = total
+    return chunks
 
 def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool = None) -> int:
     """
@@ -312,6 +578,19 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
             return not is_excluded
 
+    semantic_indexing_config = {
+        **DEFAULT_SEMANTIC_INDEXING_CONFIG,
+        **configs.get("semantic_indexing", {}),
+    }
+    semantic_summary_config = {
+        **DEFAULT_SEMANTIC_INDEXING_CONFIG["summary"],
+        **semantic_indexing_config.get("summary", {}),
+    }
+    code_chunk_max_tokens = int(semantic_indexing_config.get("code_chunk_max_tokens", 1200))
+    code_chunk_overlap_tokens = int(semantic_indexing_config.get("code_chunk_overlap_tokens", 120))
+    include_semantic_summary = bool(semantic_indexing_config.get("enabled", True))
+    summarizer = LLMCodeSummarizer(semantic_summary_config)
+
     # Process code files first
     for ext in code_extensions:
         files = glob.glob(f"{path}/**/*{ext}", recursive=True)
@@ -334,54 +613,93 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                     # Check token count
                     token_count = count_tokens(content, embedder_type)
-                    
-                    if token_count > MAX_EMBEDDING_TOKENS * 10:
-                        # 大文件 - 使用智能分块处理
-                        logger.info(f"Large code file {relative_path}: Token count ({token_count}) - applying intelligent chunking")
-                        from api.text_chunker import chunk_large_file
-                        
-                        # 分块处理
-                        count_fn = lambda text: count_tokens(text, embedder_type)
-                        chunks = chunk_large_file(content, relative_path, count_fn, 
-                                                  max_tokens=MAX_EMBEDDING_TOKENS * 8,  # 给代码文件更大的块
-                                                  overlap_tokens=400)
-                        
-                        # 为每个块创建文档
-                        for chunk in chunks:
-                            doc = Document(
-                                text=chunk.content,
-                                meta_data={
-                                    "file_path": relative_path,
-                                    "type": ext[1:],
-                                    "is_code": True,
-                                    "is_implementation": is_implementation,
-                                    "title": f"{relative_path} (Part {chunk.chunk_index + 1}/{chunk.total_chunks})",
-                                    "token_count": count_tokens(chunk.content, embedder_type),
-                                    "is_chunk": True,
-                                    "chunk_index": chunk.chunk_index,
-                                    "total_chunks": chunk.total_chunks,
-                                    "chunk_start_line": chunk.start_line,
-                                    "chunk_end_line": chunk.end_line,
-                                },
+                    count_fn = lambda text: count_tokens(text, embedder_type)
+
+                    # 对代码文件统一做语法结构分块；Python优先AST，其他语言走增强语法分块。
+                    # 超大方法由 EnhancedCodeChunker 固定长度兜底切分。
+                    from api.text_chunker_v2 import chunk_large_file_v2
+
+                    if ext == ".py":
+                        chunks = chunk_python_ast_first(
+                            content,
+                            relative_path,
+                            count_fn,
+                            max_tokens=code_chunk_max_tokens,
+                            overlap_tokens=code_chunk_overlap_tokens,
+                        )
+                        if not chunks:
+                            chunks = chunk_large_file_v2(
+                                content,
+                                relative_path,
+                                count_fn,
+                                max_tokens=code_chunk_max_tokens,
+                                overlap_tokens=code_chunk_overlap_tokens,
                             )
-                            documents.append(doc)
-                        
-                        logger.info(f"Split {relative_path} into {len(chunks)} chunks")
                     else:
-                        # 正常大小的文件 - 直接处理
+                        chunks = chunk_large_file_v2(
+                            content,
+                            relative_path,
+                            count_fn,
+                            max_tokens=code_chunk_max_tokens,
+                            overlap_tokens=code_chunk_overlap_tokens,
+                        )
+
+                    if not chunks:
+                        logger.warning(f"No chunks generated for {relative_path}, fallback to whole file")
+                        chunks = [SimpleChunk(
+                            content=content,
+                            chunk_index=0,
+                            total_chunks=1,
+                            start_line=1,
+                            end_line=len(content.splitlines()),
+                            metadata={"block_type": "code"},
+                        )]
+
+                    for chunk in chunks:
+                        chunk_text = chunk.content
+                        summary_text = ""
+                        embedding_text = chunk_text
+                        if include_semantic_summary:
+                            summary_text = summarizer.summarize(
+                                chunk_text,
+                                relative_path,
+                                getattr(chunk, "metadata", {}) or {},
+                            )
+                            embedding_text = build_semantic_embedding_text(chunk_text, summary_text)
+
                         doc = Document(
-                            text=content,
+                            text=embedding_text,
                             meta_data={
                                 "file_path": relative_path,
                                 "type": ext[1:],
                                 "is_code": True,
                                 "is_implementation": is_implementation,
-                                "title": relative_path,
-                                "token_count": token_count,
-                                "is_chunk": False,
+                                "title": (
+                                    f"{relative_path} (Part {chunk.chunk_index + 1}/{chunk.total_chunks})"
+                                    if chunk.total_chunks > 1 else relative_path
+                                ),
+                                "token_count": count_tokens(embedding_text, embedder_type),
+                                "is_chunk": chunk.total_chunks > 1,
+                                "chunk_index": chunk.chunk_index,
+                                "total_chunks": chunk.total_chunks,
+                                "chunk_start_line": chunk.start_line,
+                                "chunk_end_line": chunk.end_line,
+                                "chunk_metadata": getattr(chunk, "metadata", {}),
+                                "semantic_summary": summary_text,
+                                "skip_text_split": True,
+                                "semantic_embedding_source": "summary+code" if include_semantic_summary else "code",
+                                "raw_token_count": token_count,
                             },
                         )
                         documents.append(doc)
+
+                    logger.info(
+                        "Semantic chunked code file %s into %s chunks (raw_tokens=%s, chunk_max=%s)",
+                        relative_path,
+                        len(chunks),
+                        token_count,
+                        code_chunk_max_tokens,
+                    )
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
 
@@ -476,7 +794,7 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     if embedder_type is None:
         embedder_type = get_embedder_type()
 
-    splitter = TextSplitter(**configs["text_splitter"])
+    splitter = MetadataAwareTextSplitter(TextSplitter(**configs["text_splitter"]))
     embedder_config = get_embedder_config()
 
     embedder = get_embedder(embedder_type=embedder_type)
@@ -1033,6 +1351,8 @@ class DatabaseManager:
             }
             self.repo_url_or_path = repo_url_or_path
             logger.info(f"Repo paths: {self.repo_paths}")
+            # GitNexus analysis is run after wiki generation (see websocket_wiki_parallel)
+            # so the graph is built from the final repo state and does not block prepare.
 
         except Exception as e:
             logger.error(f"Failed to create repository structure: {e}")

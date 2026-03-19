@@ -53,6 +53,11 @@ from adalflow.components.model_client.utils import parse_embedding_response
 log = logging.getLogger(__name__)
 T = TypeVar("T")
 
+# DashScope embedding API returns 400 when input length is outside [1, 8192].
+# Keep a small safety margin to reduce boundary-related failures.
+DASHSCOPE_EMBEDDING_MAX_INPUT_LENGTH = 8192
+DASHSCOPE_EMBEDDING_SAFE_INPUT_LENGTH = 8000
+
 
 # completion parsing functions and you can combine them into one singple chat completion parser
 def get_first_message_content(completion: ChatCompletion) -> str:
@@ -203,6 +208,47 @@ class OpenAIClient(ModelClient):
             )
         return AsyncOpenAI(api_key=api_key, base_url=self.base_url)
 
+    def _is_dashscope_embedding_request(self, model_kwargs: Dict[str, Any]) -> bool:
+        base_url = (self.base_url or "").lower()
+        if "dashscope.aliyuncs.com" in base_url:
+            return True
+
+        model_name = str(model_kwargs.get("model", "")).lower()
+        return model_name.startswith("text-embedding-v")
+
+    def _sanitize_embedding_inputs(
+        self, raw_input: Sequence[Any], model_kwargs: Dict[str, Any]
+    ) -> List[str]:
+        """Normalize embedding inputs and apply provider-specific safety guards."""
+        is_dashscope = self._is_dashscope_embedding_request(model_kwargs)
+        sanitized_inputs: List[str] = []
+
+        for idx, item in enumerate(raw_input):
+            text = item if isinstance(item, str) else str(item)
+            stripped_text = text.strip()
+
+            if is_dashscope and len(text) > DASHSCOPE_EMBEDDING_SAFE_INPUT_LENGTH:
+                original_len = len(text)
+                text = text[:DASHSCOPE_EMBEDDING_SAFE_INPUT_LENGTH]
+                log.warning(
+                    "Embedding input too long for DashScope at index %s (len=%s), truncated to %s chars",
+                    idx,
+                    original_len,
+                    len(text),
+                )
+
+            # Hard guard to avoid accidental overflow after future changes.
+            if is_dashscope and len(text) > DASHSCOPE_EMBEDDING_MAX_INPUT_LENGTH:
+                text = text[:DASHSCOPE_EMBEDDING_MAX_INPUT_LENGTH]
+
+            # DashScope requires min length 1; normalize empty/whitespace-only inputs.
+            if is_dashscope and not stripped_text:
+                text = " "
+
+            sanitized_inputs.append(text)
+
+        return sanitized_inputs
+
     # def _parse_chat_completion(self, completion: ChatCompletion) -> "GeneratorOutput":
     #     # TODO: raw output it is better to save the whole completion as a source of truth instead of just the message
     #     try:
@@ -298,7 +344,9 @@ class OpenAIClient(ModelClient):
             # convert input to input
             if not isinstance(input, Sequence):
                 raise TypeError("input must be a sequence of text")
-            final_model_kwargs["input"] = input
+            final_model_kwargs["input"] = self._sanitize_embedding_inputs(
+                input, final_model_kwargs
+            )
         elif model_type == ModelType.LLM:
             # convert input to messages
             messages: List[Dict[str, str]] = []

@@ -2,10 +2,17 @@
 文本分块器 V2 - 增强版
 支持处理超大函数的边缘情况
 """
-from text_chunker import (
-    TextChunker, CodeChunker, MarkdownChunker, PlainTextChunker,
-    TextChunk, get_chunker
-)
+try:
+    from api.text_chunker import (
+        TextChunker, CodeChunker, MarkdownChunker, PlainTextChunker,
+        TextChunk, get_chunker
+    )
+except Exception:
+    # Backward-compatible import for direct script execution from api/ directory
+    from text_chunker import (
+        TextChunker, CodeChunker, MarkdownChunker, PlainTextChunker,
+        TextChunk, get_chunker
+    )
 import re
 import logging
 from typing import List, Dict, Any, Optional
@@ -157,33 +164,39 @@ class EnhancedCodeChunker(CodeChunker):
         current_start = block_start
         
         for para_lines in paragraphs:
-            test_lines = current_chunk_lines + para_lines
-            test_text = ''.join(test_lines)
-            test_tokens = count_tokens_fn(test_text)
+            # 对超大段落做固定长度兜底分割，避免单段本身超过限制
+            paragraph_slices = self._split_paragraph_safely(
+                para_lines, header_lines, signature_line, count_tokens_fn
+            )
+
+            for para_slice in paragraph_slices:
+                test_lines = current_chunk_lines + para_slice
+                test_text = ''.join(test_lines)
+                test_tokens = count_tokens_fn(test_text)
             
-            if test_tokens > self.max_tokens and len(current_chunk_lines) > len(header_lines) + 1:
-                # 保存当前块
-                chunk_content = ''.join(current_chunk_lines)
-                chunks.append(self._create_chunk(
-                    content=chunk_content,
-                    start_line=current_start,
-                    end_line=current_start + len(current_chunk_lines),
-                    chunk_index=chunk_index,
-                    total_chunks=0,
-                    metadata={
-                        **metadata, 
-                        'block_type': 'code_fragment',
-                        'has_header': True,
-                        'is_partial_function': True
-                    }
-                ))
-                
-                # 开始新块（带函数签名和当前段落）
-                current_chunk_lines = header_lines.copy() + [signature_line, '\n'] + para_lines
-                current_start += len(chunk_content.splitlines())
-                chunk_index += 1
-            else:
-                current_chunk_lines.extend(para_lines)
+                if test_tokens > self.max_tokens and len(current_chunk_lines) > len(header_lines) + 1:
+                    # 保存当前块
+                    chunk_content = ''.join(current_chunk_lines)
+                    chunks.append(self._create_chunk(
+                        content=chunk_content,
+                        start_line=current_start,
+                        end_line=current_start + len(current_chunk_lines),
+                        chunk_index=chunk_index,
+                        total_chunks=0,
+                        metadata={
+                            **metadata, 
+                            'block_type': 'code_fragment',
+                            'has_header': True,
+                            'is_partial_function': True
+                        }
+                    ))
+                    
+                    # 开始新块（带函数签名和当前段落切片）
+                    current_chunk_lines = header_lines.copy() + [signature_line, '\n'] + para_slice
+                    current_start += len(chunk_content.splitlines())
+                    chunk_index += 1
+                else:
+                    current_chunk_lines.extend(para_slice)
         
         # 保存最后一个块
         if len(current_chunk_lines) > len(header_lines) + 1:
@@ -222,6 +235,52 @@ class EnhancedCodeChunker(CodeChunker):
             paragraphs.append(current_para)
         
         return paragraphs
+
+    def _split_paragraph_safely(
+        self,
+        paragraph_lines: List[str],
+        header_lines: List[str],
+        signature_line: str,
+        count_tokens_fn
+    ) -> List[List[str]]:
+        """
+        当单段过大时，按固定行窗口进一步切分。
+        这样即便遇到超长方法中的超长单段，也能保证不超过max_tokens。
+        """
+        if not paragraph_lines:
+            return [[]]
+
+        base_prefix = ''.join(header_lines + [signature_line, '\n'])
+        paragraph_text = ''.join(paragraph_lines)
+        if count_tokens_fn(base_prefix + paragraph_text) <= self.max_tokens:
+            return [paragraph_lines]
+
+        slices: List[List[str]] = []
+        current_slice: List[str] = []
+        fixed_line_cap = 80
+
+        for line in paragraph_lines:
+            test_slice = current_slice + [line]
+            test_text = base_prefix + ''.join(test_slice)
+
+            # 双重条件：token和固定行数，任何一个触发都切
+            should_flush = (
+                current_slice
+                and (
+                    count_tokens_fn(test_text) > self.max_tokens
+                    or len(test_slice) > fixed_line_cap
+                )
+            )
+            if should_flush:
+                slices.append(current_slice)
+                current_slice = [line]
+            else:
+                current_slice = test_slice
+
+        if current_slice:
+            slices.append(current_slice)
+
+        return slices
 
 
 def get_enhanced_chunker(file_type: str, max_tokens: int = 8192, 

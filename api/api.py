@@ -11,6 +11,7 @@ import google.generativeai as genai
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from api.gitnexus_cli import run_gitnexus_analyze
 
 # Configure logging
 from api.logging_config import setup_logging
@@ -782,6 +783,43 @@ def _extract_repo_name(repo_url: str, repo_type: str) -> str:
     else:
         return url_parts[-1].replace(".git", "")
 
+
+def _resolve_repo_dir_for_prepare(repo_url: str, repo_type: str) -> str:
+    """
+    Resolve repository directory used by DeepWiki prepare flow.
+    """
+    repo_url = repo_url.strip()
+    if repo_url.startswith("https://") or repo_url.startswith("http://"):
+        repo_name = _extract_repo_name(repo_url, repo_type)
+        return os.path.join(get_adalflow_default_root_path(), "repos", repo_name)
+    return repo_url
+
+
+def _has_gitnexus_index(repo_dir: str) -> bool:
+    """
+    Check whether repository already has GitNexus index artifacts.
+    """
+    index_dir = os.path.join(repo_dir, ".gitnexus")
+    if not os.path.isdir(index_dir):
+        return False
+
+    for _, _, files in os.walk(index_dir):
+        if files:
+            return True
+    return False
+
+
+def _run_gitnexus_analysis_for_repo(repo_dir: str) -> tuple[bool, str]:
+    """
+    Run GitNexus analyze and return (success, message) without raising.
+    """
+    if not os.path.isdir(repo_dir):
+        return False, f"Repository directory not found: {repo_dir}"
+
+    if run_gitnexus_analyze(repo_dir):
+        return True, "GitNexus analysis completed"
+    return False, "GitNexus analysis skipped or failed"
+
 def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str],
                              excluded_dirs: Optional[str], excluded_files: Optional[str],
                              included_dirs: Optional[str], included_files: Optional[str],
@@ -839,12 +877,34 @@ def _background_prepare_repo(repo_url: str, repo_type: str, token: Optional[str]
             included_files=parsed_included_files,
             branch=branch
         )
-        
-        # Update status to ready
+
+        # Run GitNexus analyze in the same mainline flow so codemap works
+        # immediately after repository preparation.
+        repo_dir = None
+        if db_manager.repo_paths:
+            repo_dir = db_manager.repo_paths.get("save_repo_dir")
+        repo_dir = repo_dir or _resolve_repo_dir_for_prepare(repo_url, repo_type)
+
+        with preparing_repos_lock:
+            preparing_repos[repo_url] = {
+                "status": "processing",
+                "message": "Repository prepared. Running GitNexus analysis...",
+                "started_at": datetime.now()
+            }
+
+        analyzed, analyze_message = _run_gitnexus_analysis_for_repo(repo_dir)
+        if not analyzed:
+            logger.warning("GitNexus analysis was not completed for %s: %s", repo_url, analyze_message)
+
+        # Update status to ready (GitNexus failure should not block wiki flow)
         with preparing_repos_lock:
             preparing_repos[repo_url] = {
                 "status": "ready",
-                "message": "Repository prepared successfully",
+                "message": (
+                    "Repository prepared successfully. GitNexus graph ready."
+                    if analyzed
+                    else f"Repository prepared successfully. {analyze_message}"
+                ),
                 "completed_at": datetime.now()
             }
         
@@ -906,9 +966,34 @@ async def prepare_repo(request: RepoPrepareRequest):
                     valid_docs = [doc for doc in documents if hasattr(doc, 'vector') and doc.vector and len(doc.vector) > 0]
                     if valid_docs:
                         logger.info(f"Repository {repo_name} already prepared with {len(valid_docs)} documents")
-                        return RepoPrepareResponse(
-                            status="ready",
-                            message=f"Repository already prepared with {len(valid_docs)} embedded documents"
+                        repo_dir = _resolve_repo_dir_for_prepare(repo_url, request.repo_type)
+                        if _has_gitnexus_index(repo_dir):
+                            return RepoPrepareResponse(
+                                status="ready",
+                                message=f"Repository already prepared with {len(valid_docs)} embedded documents"
+                            )
+
+                        logger.info(
+                            "Embeddings are ready but GitNexus index is missing for %s. Starting background analyze.",
+                            repo_url,
+                        )
+                        repo_prepare_executor.submit(
+                            _background_prepare_repo,
+                            repo_url,
+                            request.repo_type,
+                            request.token,
+                            request.excluded_dirs,
+                            request.excluded_files,
+                            request.included_dirs,
+                            request.included_files,
+                            request.branch
+                        )
+                        return JSONResponse(
+                            status_code=202,
+                            content={
+                                "status": "accepted",
+                                "message": "Repository embeddings are ready. GitNexus analysis started in background."
+                            }
                         )
             except Exception as e:
                 logger.warning(f"Error loading existing database, will re-prepare: {e}")

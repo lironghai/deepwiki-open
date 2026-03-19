@@ -11,7 +11,7 @@
     "tpm": 1100000,
     "model_kwargs": {
       "model": "text-embedding-v4",
-      "dimensions": 256,
+      "dimensions": 1024,
       "encoding_format": "float"
     }
   },
@@ -44,5 +44,15 @@
     "split_by": "word",
     "chunk_size": 350,
     "chunk_overlap": 100
+  },
+  "semantic_indexing": {
+    "enabled": true,
+    "code_chunk_max_tokens": 1200,
+    "code_chunk_overlap_tokens": 120,
+    "summary": {
+      "enabled": false,
+      "max_code_chars": 2400,
+      "max_summary_chars": 320
+    }
   }
 }

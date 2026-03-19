@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://localhost:29004' ;
+const WS_SERVER_BASE_URL = process.env.WS_SERVER_BASE_URL || 'http://localhost:29004';
+// GitNexus 内网地址，由 Next 转发，无需对外暴露 3001 端口
+const GITNEXUS_UPSTREAM = process.env.GITNEXUS_UPSTREAM_URL || 'http://127.0.0.1:3001';
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -9,6 +11,12 @@ const nextConfig: NextConfig = {
   // 将服务器 URL 暴露给客户端（浏览器）
   env: {
     NEXT_PUBLIC_WS_SERVER_URL: WS_SERVER_BASE_URL,
+    NEXT_PUBLIC_GITNEXUS_DEFAULT_OPENAI_API_KEY:
+      process.env.DASHSCOPE_API_KEY || process.env.OPENAI_API_KEY || '',
+    NEXT_PUBLIC_GITNEXUS_DEFAULT_OPENAI_BASE_URL:
+      process.env.DASHSCOPE_BASE_URL || process.env.OPENAI_BASE_URL || '',
+    NEXT_PUBLIC_GITNEXUS_DEFAULT_OPENAI_MODEL:
+      process.env.GITNEXUS_DEFAULT_OPENAI_MODEL || 'qwen-plus',
   },
   // Disable linting during build to speed up deployment
   eslint: {
@@ -90,6 +98,15 @@ const nextConfig: NextConfig = {
       {
         source: '/api/project',
         destination: `${TARGET_SERVER_BASE_URL}/api/project`,
+      },
+      // GitNexus 深度图谱：同源访问 /gitnexus，由 Next 转发到本地 3001，Docker 无需单独映射 3001
+      {
+        source: '/gitnexus',
+        destination: `${GITNEXUS_UPSTREAM}`,
+      },
+      {
+        source: '/gitnexus/:path*',
+        destination: `${GITNEXUS_UPSTREAM}/:path*`,
       },
     ];
   },

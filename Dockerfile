@@ -9,14 +9,24 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --legacy-peer-deps
 
+# 构建本地维护的 gitnexus-web（避免 Docker 缓存住旧的远程 clone 产物）
+# 源码位于 .gitnexus-web-build/gitnexus-web
+FROM node_base AS gitnexus_web
+WORKDIR /build/gitnexus-web
+COPY .gitnexus-web-build/gitnexus-web/package.json ./
+COPY .gitnexus-web-build/gitnexus-web/package-lock.json ./
+RUN npm ci --include=optional \
+    && npm i @rollup/rollup-linux-x64-musl --no-save
+COPY .gitnexus-web-build/gitnexus-web ./
+RUN npx vite build --base /gitnexus-app/
+
 FROM node_base AS node_builder
 WORKDIR /app
 COPY --from=node_deps /app/node_modules ./node_modules
-# Copy only necessary files for Next.js build
 COPY package.json package-lock.json next.config.ts tsconfig.json tailwind.config.js postcss.config.mjs ./
 COPY src/ ./src/
 COPY public/ ./public/
-# Increase Node.js memory limit for build and disable telemetry
+COPY --from=gitnexus_web /build/gitnexus-web/dist ./public/gitnexus-app
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN NODE_ENV=production npm run build
@@ -25,7 +35,8 @@ FROM python:3.11-slim AS py_deps
 WORKDIR /api
 COPY api/pyproject.toml .
 COPY api/poetry.lock .
-RUN python -m pip install poetry==2.0.1 --no-cache-dir && \
+RUN python -m pip install --upgrade pip && \
+    python -m pip install poetry==2.0.1 --no-cache-dir && \
     poetry config virtualenvs.create true --local && \
     poetry config virtualenvs.in-project true --local && \
     poetry config virtualenvs.options.always-copy --local true && \
@@ -39,12 +50,15 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install Node.js and npm
+# Install build tools for node-gyp (required by GitNexus dependencies like tree-sitter)
 RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     git \
     ca-certificates \
+    build-essential \
+    make \
+    g++ \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
@@ -52,6 +66,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install GitNexus globally. Removing fallback so it actually fails if unsuccessful.
+RUN npm cache clean --force && npm install -g gitnexus
 
 # Update certificates if custom ones were provided and copied successfully
 RUN if [ -n "${CUSTOM_CERT_DIR}" ]; then \
@@ -104,6 +121,16 @@ if [ "${MCP_ENABLED:-false}" = "true" ]; then\n\
   python -m api.mcp_server --http --port ${MCP_PORT:-8002} &\n\
   MCP_PID=$!\n\
 fi\n\
+\n\
+# Start GitNexus serve process\n\
+echo "Starting GitNexus Server on port 3001..."\n\
+if command -v gitnexus &> /dev/null; then\n\
+  gitnexus serve --port 3001 &\n\
+else\n\
+  echo "gitnexus not found globally, using npx..."\n\
+  npx -y gitnexus serve --port 3001 &\n\
+fi\n\
+GITNEXUS_PID=$!\n\
 \n\
 # Start Next.js frontend\n\
 PORT=3000 HOSTNAME=0.0.0.0 node server.js &\n\

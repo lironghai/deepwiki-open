@@ -284,13 +284,18 @@ def load_lang_config():
 
     return loaded_config
 
-# Default excluded directories and files
+# Default excluded directories and files.
+# If the cloned repo contains AGENTS.md / CLAUDE.md, they are excluded from
+# wiki content, classic codemap, and embedding; this is intentional and has no
+# negative impact on normal usage.
 DEFAULT_EXCLUDED_DIRS: List[str] = [
     # Virtual environments and package managers
     "./.venv/", "./venv/", "./env/", "./virtualenv/",
     "./node_modules/", "./bower_components/", "./jspm_packages/",
     # Version control
     "./.git/", "./.svn/", "./.hg/", "./.bzr/",
+    # AI / agent helper artifacts
+    "./.claude/", "./.cursor/", "./.gitnexus/",
     # Cache and compiled files
     "./__pycache__/", "./.pytest_cache/", "./.mypy_cache/", "./.ruff_cache/", "./.coverage/",
     # Build and distribution
@@ -308,6 +313,8 @@ DEFAULT_EXCLUDED_FILES: List[str] = [
     "Pipfile.lock", "requirements.txt.lock", "Cargo.lock", "composer.lock",
     ".lock", ".DS_Store", "Thumbs.db", "desktop.ini", "*.lnk", ".env",
     ".env.*", "*.env", "*.cfg", "*.ini", ".flaskenv", ".gitignore",
+    "AGENTS.md", "CLAUDE.md", ".codemap_summary.json", ".mcp.json",
+    ".cursorrules", ".windsurfrules", ".cursorignore",
     ".gitattributes", ".gitmodules", ".github", ".gitlab-ci.yml",
     ".prettierrc", ".eslintrc", ".eslintignore", ".stylelintrc",
     ".editorconfig", ".jshintrc", ".pylintrc", ".flake8", "mypy.ini",
@@ -341,7 +348,7 @@ if generator_config:
 
 # Update embedder configuration
 if embedder_config:
-    for key in ["embedder", "embedder_ollama", "embedder_google", "embedder_bedrock", "retriever", "text_splitter"]:
+    for key in ["embedder", "embedder_ollama", "embedder_google", "embedder_bedrock", "retriever", "text_splitter", "semantic_indexing"]:
         if key in embedder_config:
             configs[key] = embedder_config[key]
 

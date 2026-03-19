@@ -8,6 +8,8 @@ node_modules
 npm-debug.log
 yarn-debug.log
 yarn-error.log
+.gitnexus-web-build/gitnexus-web/node_modules
+.gitnexus-web-build/gitnexus-web/dist
 
 # Next.js
 .next

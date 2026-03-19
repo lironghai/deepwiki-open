@@ -43,6 +43,10 @@ wheels/
 # production
 /build
 
+# GitNexus web (built by scripts/build-gitnexus-web.sh or Docker)
+/public/gitnexus-app
+.gitnexus-web-build
+
 # misc
 .DS_Store
 *.pem

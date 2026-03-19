@@ -168,11 +168,27 @@ class ParallelWikiGenerator:
         try:
             # Use codemap context for proper resource management
             if self.enable_codemap:
+                
+                # Fetch GitNexus GraphRAG Context
+                graph_context_text = ""
+                try:
+                    from api.tools.graph_retriever import GraphRetriever
+                    retriever = GraphRetriever(repo_path)
+                    
+                    query_text = f"{title} {page.get('description', '')}"
+                    graph_result = await retriever.query_context(query_text)
+                    if graph_result:
+                        graph_context_text = f"\n## Deep Graph Context (from GitNexus)\n{graph_result}\n"
+                except Exception as e:
+                    logger.warning(f"Failed to fetch GraphRAG context for page {title}: {e}")
+                    
                 with codemap_context(repo_path) as codemap:
+                    # We pass the graph_context_text to be appended to the prompt
                     content, modules = await self._generate_with_codemap(
                         page,
                         codemap,
-                        page_index
+                        page_index,
+                        graph_context_text
                     )
                     codemap_used = bool(codemap)
                     modules_referenced = len(modules)
@@ -212,7 +228,8 @@ class ParallelWikiGenerator:
         self,
         page: Dict[str, Any],
         codemap: Dict[str, Any],
-        page_index: int
+        page_index: int,
+        graph_context_text: str = ""
     ) -> tuple[str, List[Dict]]:
         """
         Generate content with codemap enhancement
@@ -221,6 +238,7 @@ class ParallelWikiGenerator:
             page: Page information
             codemap: Codemap data
             page_index: Page index
+            graph_context_text: Additional context from Graph Retriever
 
         Returns:
             Tuple of (content, relevant_modules)
@@ -236,7 +254,8 @@ class ParallelWikiGenerator:
         content = await self._generate_content_with_codemap(
             page,
             relevant_modules,
-            codemap
+            codemap,
+            graph_context_text
         )
 
         return content, relevant_modules
@@ -318,7 +337,8 @@ class ParallelWikiGenerator:
         self,
         page: Dict[str, Any],
         modules: List[Dict],
-        codemap: Dict[str, Any]
+        codemap: Dict[str, Any],
+        graph_context_text: str = ""
     ) -> str:
         """
         Generate content using codemap information
@@ -327,12 +347,13 @@ class ParallelWikiGenerator:
             page: Page information
             modules: Relevant modules
             codemap: Full codemap data
+            graph_context_text: Additional context from GitNexus graph
 
         Returns:
             Generated content
         """
         # Build enhanced prompt with codemap context
-        prompt = self._build_enhanced_prompt(page, modules, codemap)
+        prompt = self._build_enhanced_prompt(page, modules, codemap, graph_context_text)
 
         # Call LLM service
         if self.llm_service:
@@ -347,7 +368,8 @@ class ParallelWikiGenerator:
         self,
         page: Dict[str, Any],
         modules: List[Dict],
-        codemap: Dict[str, Any]
+        codemap: Dict[str, Any],
+        graph_context_text: str = ""
     ) -> str:
         """
         Build enhanced prompt with codemap context
@@ -356,6 +378,7 @@ class ParallelWikiGenerator:
             page: Page information
             modules: Relevant modules
             codemap: Codemap data
+            graph_context_text: Additional context from GitNexus graph
 
         Returns:
             Enhanced prompt string
@@ -367,6 +390,9 @@ class ParallelWikiGenerator:
 
         if description:
             prompt += f"## Description\n{description}\n\n"
+
+        if graph_context_text:
+            prompt += f"{graph_context_text}\n\n"
 
         # Add module context
         if modules:

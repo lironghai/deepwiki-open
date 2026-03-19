@@ -3,6 +3,7 @@
 """
 import os
 import logging
+import fnmatch
 from typing import List, Dict, Any, Optional, Set, Tuple
 from pathlib import Path
 import json
@@ -121,13 +122,16 @@ class CodeAnalyzer:
     DEFAULT_EXCLUDED_DIRS = {
         'node_modules', '.git', '__pycache__', 'venv', '.venv',
         'dist', 'build', 'target', '.next', '.nuxt', 'coverage',
-        '.pytest_cache', '.idea', '.vscode', 'vendor'
+        '.pytest_cache', '.idea', '.vscode', 'vendor',
+        '.claude', '.cursor', '.gitnexus'
     }
     
     # 默认排除的文件
     DEFAULT_EXCLUDED_FILES = {
         '.DS_Store', 'package-lock.json', 'yarn.lock', 'Pipfile.lock',
-        '*.min.js', '*.bundle.js'
+        '*.min.js', '*.bundle.js',
+        'AGENTS.md', 'CLAUDE.md', '.codemap_summary.json',
+        '.mcp.json', '.cursorrules', '.windsurfrules', '.cursorignore'
     }
     
     def __init__(self, repo_path: str, options: Optional[Dict[str, Any]] = None):
@@ -229,6 +233,9 @@ class CodeAnalyzer:
                     self._traverse_directory(item, depth + 1)
                 
                 elif item.is_file():
+                    if any(fnmatch.fnmatch(item.name, pattern) for pattern in self.DEFAULT_EXCLUDED_FILES):
+                        continue
+
                     # 跳过不包含测试文件的情况
                     if not self.include_tests and 'test' in item.name.lower():
                         continue

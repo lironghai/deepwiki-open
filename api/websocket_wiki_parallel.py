@@ -228,8 +228,18 @@ async def handle_websocket_wiki_generate(websocket: WebSocket):
             })
         except (RuntimeError, Exception) as e:
             logger.warning(f"Could not send completion message: {e}")
-        
+
         logger.info(f"Wiki generation completed: {len(processed_results)} pages (serial mode)")
+
+        # Run GitNexus analysis after wiki is done so the graph is built from final repo state
+        try:
+            from api.gitnexus_cli import run_gitnexus_analyze
+            if run_gitnexus_analyze(repo_path):
+                logger.info("GitNexus analysis completed for repo at %s", repo_path)
+            else:
+                logger.warning("GitNexus analysis skipped or failed for repo at %s", repo_path)
+        except Exception as gn_err:
+            logger.warning("GitNexus post-wiki run failed: %s", gn_err)
         
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")

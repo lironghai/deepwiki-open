@@ -246,6 +246,24 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             except Exception as e:
                 logger.error(f"Error retrieving documents: {str(e)}")
                 context_text = ""
+                
+            # Add GraphRAG context
+            try:
+                if hasattr(request_rag, 'repo_path') and request_rag.repo_path:
+                    from api.tools.graph_retriever import GraphRetriever
+                    graph_retriever = GraphRetriever(request_rag.repo_path)
+                    graph_result = await graph_retriever.query_context(rag_query)
+                    
+                    if graph_result:
+                        graph_context = f"\n\n## Deep Graph Context (from GitNexus)\n\n{graph_result}\n\n"
+                        # Insert graph context before the file-based context
+                        if context_text:
+                            context_text = graph_context + context_text
+                        else:
+                            context_text = graph_context
+                        logger.info("Successfully added GraphRAG context")
+            except Exception as e:
+                logger.error(f"Error retrieving GraphRAG context: {str(e)}")
 
         # Get repository information
         repo_url = request.repo_url
