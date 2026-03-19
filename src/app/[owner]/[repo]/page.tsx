@@ -2666,14 +2666,14 @@ CRITICAL RULES - MUST FOLLOW:
                   <FaProjectDiagram className="mr-2" />
                   深度代码图谱 (GitNexus 引擎)
                 </Link>
-                <Link
+                {/*<Link
                   href={`/${owner}/${repo}/codemap-legacy?${searchParams.toString()}`}
                   className="flex items-center text-xs px-3 py-2 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 border border-[var(--border-color)] transition-colors w-full"
                   title="经典代码地图"
                 >
                   <FaProjectDiagram className="mr-2 opacity-70" />
                   基础代码地图 (经典版)
-                </Link>
+                </Link>*/}
               </div>
 
               {Object.keys(generatedPages).length > 0 && (
